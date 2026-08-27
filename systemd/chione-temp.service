@@ -1,0 +1,21 @@
+[Unit]
+Description=Gamdias Chione E4 temperature display (real CPU temp via hwmon)
+
+[Service]
+# The script auto-discovers both the cooler (by USB ID) and the CPU sensor
+# (by hwmon driver name), so nothing here needs editing for AMD vs Intel.
+#
+# The one path that does: this assumes the repo was cloned into your home
+# directory as ~/chione-display-linux. If you cloned it elsewhere, either
+# fix the path below or let `./install.sh service` generate this unit with
+# the real path.
+ExecStart=/usr/bin/python3 %h/chione-display-linux/chione_temp_display.py
+Restart=on-failure
+RestartSec=5
+# Stop retrying on permanent misconfiguration (exit code 2): no matching
+# hwmon sensor, or no permission to the device. Fix the cause, then
+# `systemctl --user restart chione-temp.service`.
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target

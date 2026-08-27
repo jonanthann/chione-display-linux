@@ -1,0 +1,37 @@
+# Grants the logged-in desktop user access to the Gamdias Chione E4 digital
+# display (USB 1b80:b53c) via a logind ACL (TAG+="uaccess"), so
+# chione_temp_display.py runs without root and without exposing the device
+# to every local process.
+#
+# The filename MUST sort before 73-seat-late.rules for the uaccess tag to
+# take effect, hence the 70- prefix (the same reason liquidctl ships a 71-
+# rule). Do not rename it back to 99-. This holds on every systemd
+# distribution: Debian/Ubuntu ship 73-seat-late.rules in
+# /usr/lib/udev/rules.d just as Fedora and Bazzite do.
+#
+# Install with:
+#   sudo cp udev/70-chione.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=hidraw
+# Then replug the cooler (or reboot) so the ACL is applied.
+# (--subsystem-match=hidraw keeps the trigger from re-probing unrelated
+# devices like disks, which can make the desktop show phantom duplicates.)
+#
+# Or let install.sh do all of the above, including picking between the
+# variants below: ./install.sh udev  (add --group plugdev for the second one).
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b80", ATTRS{idProduct}=="b53c", TAG+="uaccess"
+
+# Fallback 1 (headless / no graphical login): uaccess only grants access
+# while the user has an ACTIVE logind session on a seat. A service started by
+# `loginctl enable-linger` on a machine nobody logs into graphically gets no
+# ACL and will loop on "Permission denied". Grant a group instead. On
+# Debian/Ubuntu `plugdev` already exists and desktop users are usually in it
+# (check with `id`); on Fedora/Bazzite/Arch there is no plugdev by default,
+# so create one first:
+#   sudo groupadd -f plugdev && sudo usermod -aG plugdev "$USER"
+# then log out and back in for the new group to apply.
+#SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b80", ATTRS{idProduct}=="b53c", GROUP="plugdev", MODE="0660"
+
+# Fallback 2 (last resort): world read/write on the node. Simple, but any
+# local process can then drive the display. Prefer fallback 1.
+#SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b80", ATTRS{idProduct}=="b53c", MODE="0666"
