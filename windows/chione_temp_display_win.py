@@ -188,12 +188,18 @@ def walk_temperature_sensors(node, path=()):
         yield from walk_temperature_sensors(child, here)
 
 
+def _is_cpu_path(path):
+    return any("cpu" in part.lower() or "ryzen" in part.lower()
+               or "intel" in part.lower() for part in path)
+
+
 def pick_cpu_sensor(sensors, wanted=None):
     """Choose which temperature sensor to display.
 
     `sensors` is a list of (path, name, celsius). With --sensor, match that
-    name; otherwise fall back to SENSOR_PREFERENCE, restricted to sensors
-    that live under a CPU node so a motherboard/GPU probe is never picked.
+    name; otherwise use SENSOR_PREFERENCE, restricted to sensors that live
+    under a CPU node. If none does, fall back to all sensors (so a
+    motherboard/GPU probe may be picked; main() warns in that case).
     """
     if wanted:
         low = wanted.lower()
@@ -203,8 +209,7 @@ def pick_cpu_sensor(sensors, wanted=None):
         return None
 
     cpu_sensors = [(p, n) for p, n, _ in sensors
-                   if any("cpu" in part.lower() or "ryzen" in part.lower()
-                          or "intel" in part.lower() for part in p)]
+                   if _is_cpu_path(p)]
     pool = cpu_sensors or [(p, n) for p, n, _ in sensors]
 
     for preference in SENSOR_PREFERENCE:
@@ -403,8 +408,7 @@ def main(argv=None):
             print("Note that AMD CPUs report 'Core (Tctl/Tdie)' while Intel "
                   "reports 'CPU Package'.", file=sys.stderr)
             cpu_names = [n for p, n, _ in sensors
-                         if any("cpu" in part.lower() or "ryzen" in part.lower()
-                                or "intel" in part.lower() for part in p)]
+                         if _is_cpu_path(p)]
             if cpu_names:
                 print("CPU sensors on this machine: "
                       + ", ".join(repr(n) for n in cpu_names), file=sys.stderr)
@@ -415,6 +419,11 @@ def main(argv=None):
                   "available with --list-sensors.", file=sys.stderr)
         return 2
     sensor_path, sensor_name = chosen
+    if not args.sensor and not _is_cpu_path(sensor_path):
+        print("Warning: no CPU sensor was identified; using "
+              f"{sensor_name!r} [{' / '.join(sensor_path[:-1])}]. Check "
+              "with --list-sensors and pass --sensor if this is wrong.",
+              file=sys.stderr)
     print(f"Reading temperature from: {sensor_name} "
           f"[{' / '.join(sensor_path[:-1])}]", flush=True)
     print("Ctrl+C to stop.", flush=True)

@@ -9,7 +9,7 @@ USB HID protocol:
 
 | Script | Platform | Temperature source | Dependencies |
 |--------|----------|--------------------|--------------|
-| [`chione_temp_display.py`](chione_temp_display.py) | Linux | `hwmon` (`k10temp` / `coretemp`, auto-detected) | none, standard library only |
+| [`chione_temp_display.py`](chione_temp_display.py) | Linux | `hwmon` (`k10temp` / `coretemp` / `zenpower`, auto-detected) | none, standard library only |
 | [`windows/chione_temp_display_win.py`](windows/chione_temp_display_win.py) | Windows | LibreHardwareMonitor web server | `hidapi`, LibreHardwareMonitor |
 
 The update packet is byte-for-byte identical on both; only how the script
@@ -48,9 +48,11 @@ working without leaving ZEUS CAST running.
   nothing to edit and it survives the `/dev/hidrawN` number changing across
   reboots and replugs
 - On Windows: picks the sensor by name, preferring `Tctl`/`Tdie` on AMD and
-  `CPU Package` on Intel, and ignoring motherboard, GPU and SSD probes
+  `CPU Package` on Intel, and warns if it has to fall back to a non-CPU
+  sensor
 - **Self-recovers** from USB replug and suspend/resume, and blanks the
-  display (`--.-`) on exit so a frozen reading isn't mistaken for a live one
+  display (`--.-`) on exit and when the sensor stops responding, so a
+  frozen reading isn't mistaken for a live one
 - On Linux: needs no Wine, no proprietary SDK, and no root access after a
   one-time udev rule is installed
 
@@ -139,7 +141,6 @@ Cooler (USB 1b80:b53c)
 
 CPU temperature sensor
   + k10temp temp1_input = 41.4C
-  + k10temp temp3_input = 41.0C
 
 Device access method
   + udev rule installed at /etc/udev/rules.d/70-chione.rules
@@ -171,8 +172,9 @@ sudo udevadm trigger --subsystem-match=hidraw
 
 Then replug the cooler (or reboot) so the access rule is applied. A rule
 cannot change a device node that is already open, which is why the replug
-matters. Without this, you will need to run the script (and the service
-below) with `sudo`.
+matters. Without this, the script keeps waiting for device access (printing
+how to install the rule) until the rule is installed, or you can run it
+(and the service below) as root.
 
 The rule grants access via a logind ACL (`uaccess`) to the user with the
 active graphical session. That covers the normal desktop case. It does *not*
@@ -235,8 +237,11 @@ session:
 
 ```bash
 sudo loginctl enable-linger "$USER"
+sudo groupadd -f plugdev && sudo usermod -aG plugdev "$USER"
 ./install.sh udev --group plugdev
 ```
+
+Log out and back in so the new group membership takes effect.
 
 ## Notes for Debian and Ubuntu
 
@@ -330,7 +335,7 @@ script needs editing.
 | `--list-hwmon` | — | list every hwmon temperature sensor with live values, then exit |
 
 Not sure which `--hwmon` to use? `--list-hwmon` prints every sensor with its
-driver, label and current reading, marking the ones auto-detection would
+driver, label and current reading, marking the one auto-detection would
 accept:
 
 ```console
@@ -338,7 +343,7 @@ $ python3 chione_temp_display.py --list-hwmon
 nvme      temp1_input   51.9C   Composite
 amdgpu    temp1_input   58.0C   edge
 k10temp   temp1_input   53.5C   Tctl     <- default
-k10temp   temp3_input   42.2C   Tccd1    <- default
+k10temp   temp3_input   42.2C   Tccd1
 ```
 
 ### Windows
@@ -351,6 +356,18 @@ k10temp   temp3_input   42.2C   Tccd1    <- default
 | `--wait SECONDS` | `0` | wait for LibreHardwareMonitor to come up; `-1` waits forever |
 | `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
 | `--list-sensors` | — | list every temperature sensor LibreHardwareMonitor reports, then exit |
+
+### Exit codes
+
+| Script | Code | Meaning |
+|--------|------|---------|
+| Linux | `0` | stopped normally (Ctrl+C or SIGTERM), or a `--list-*` flag |
+| Linux | `2` | no CPU hwmon sensor found (also argparse errors); the systemd unit's `RestartPreventExitStatus=2` uses it to stop restarting |
+| Windows | `0` | stopped normally |
+| Windows | `2` | LibreHardwareMonitor unreachable after `--wait`, or no sensor found |
+| Windows | `1` | `--list-sensors` found no sensors or could not connect |
+
+A missing or inaccessible cooler does not exit: both scripts keep retrying.
 
 ## Requirements
 
@@ -375,7 +392,7 @@ another model stands costs two commands and no risk, since both only read:
 
 ```bash
 lsusb                                          # what USB ID does the cooler show?
-python3 chione_temp_display.py --list-hidraw   # does it appear as 1b80:b53c?
+python3 chione_temp_display.py --list-hidraw   # look for 00001B80:0000B53C
 ```
 
 If the ID matches, the driver should simply run. If it differs, the device
