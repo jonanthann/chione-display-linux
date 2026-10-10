@@ -304,7 +304,8 @@ cmd_remove() {
     if [ -f "$UNIT_DST" ]; then
         systemctl --user disable --now "$UNIT_NAME" 2>/dev/null || true
         rm -f "$UNIT_DST"
-        systemctl --user daemon-reload
+        systemctl --user daemon-reload 2>/dev/null \
+            || warn "systemctl --user daemon-reload failed (no user bus?)"
         ok "removed $UNIT_DST"
     else
         warn "no unit at $UNIT_DST"

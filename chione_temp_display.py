@@ -261,7 +261,8 @@ def list_hwmon():
                 value = f"{read_temp_celsius(temp_input):.1f}C"
             except (OSError, ValueError):
                 value = "n/a"
-            marker = " <- default" if name in HWMON_CANDIDATES else ""
+            marker = (" <- default" if name in HWMON_CANDIDATES
+                      and temp_file == HWMON_TEMP_FILE else "")
             print(f"{name}\t{temp_file}\t{value}\t{label}{marker}")
 
 
@@ -338,7 +339,7 @@ def run(device_path, temp_path, interval, debug):
 
     last_digits = None
     last_temp = None
-    last_good = None
+    last_good = time.monotonic()
     prev_resp = None
     try:
         while not _stop:
@@ -347,10 +348,8 @@ def run(device_path, temp_path, interval, debug):
                 last_good = time.monotonic()
             except (OSError, ValueError):
                 # Transient sensor hiccup: reuse the last good reading rather
-                # than crashing. If we never got one, just skip this tick.
-                if last_temp is None:
-                    _sleep_interruptible(interval)
-                    continue
+                # than crashing. With none yet, show nothing until stale.
+                pass
 
             stale = (time.monotonic() - last_good
                      > max(STALE_AFTER_SECONDS, 2 * interval))
@@ -358,6 +357,10 @@ def run(device_path, temp_path, interval, debug):
                 # The sensor has been gone for a while (driver unloaded,
                 # hwmon renumbered): blank rather than show a frozen value.
                 digits = (BLANK, BLANK, BLANK)
+            elif last_temp is None:
+                # Never read yet and not stale: leave the display untouched.
+                _sleep_interruptible(interval)
+                continue
             else:
                 digits = temp_to_digits(last_temp)
             try:
@@ -486,8 +489,10 @@ def main(argv=None):
                 perm_warned = True
             _sleep_interruptible(RECONNECT_DELAY_SECONDS)
             continue
-        except FileNotFoundError:
-            # Node vanished between discovery and open; rediscover and retry.
+        except OSError as exc:
+            # Node vanished or is not ready (ENODEV, ENXIO, EIO, EBUSY on
+            # replug/resume); rediscover and retry.
+            print(f"Cannot open device ({exc}); will retry.", flush=True)
             result = "lost"
 
         if result == "stop":

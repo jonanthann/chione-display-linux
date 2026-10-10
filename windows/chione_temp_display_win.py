@@ -57,6 +57,7 @@ reading is not mistaken for a live one.
 """
 
 import argparse
+import http.client
 import json
 import sys
 import time
@@ -168,15 +169,18 @@ def walk_temperature_sensors(node, path=()):
     Temperature sensors are leaves whose Value ends in an actual degree unit,
     grouped under a "Temperatures" node.
     """
-    text = node.get("Text", "")
+    text = node.get("Text") or ""
     children = node.get("Children") or []
     here = path + (text,) if text else path
 
     if not children:
-        value = node.get("Value", "")
-        if "°" in value or value.strip().endswith("C"):
+        value = node.get("Value") or ""
+        is_f = "°F" in value
+        if "°C" in value or is_f or value.strip().endswith("C"):
             celsius = parse_value(value)
             if celsius is not None:
+                if is_f:
+                    celsius = (celsius - 32) * 5 / 9
                 yield here, text, celsius
         return
 
@@ -222,7 +226,8 @@ def read_sensor(url, path, name):
 def list_sensors(url):
     try:
         tree = fetch_lhm_tree(url)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, ValueError,
+                http.client.HTTPException) as exc:
         print(f"Could not reach LibreHardwareMonitor at {url}: {exc}",
               file=sys.stderr)
         return 1
@@ -256,12 +261,13 @@ def open_display():
     return device
 
 
-def run(device, url, sensor_path, sensor_name, interval, debug):
+def run(device, url, sensor_path, sensor_name, wanted, interval, debug):
     """Drive the display until the device is lost or the user stops it."""
     last_digits = None
     last_temp = None
     last_good = None
     prev_resp = None
+    last_resolve = 0.0
 
     while True:
         try:
@@ -269,7 +275,8 @@ def run(device, url, sensor_path, sensor_name, interval, debug):
             if temp is not None:
                 last_temp = temp
                 last_good = time.monotonic()
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, OSError, ValueError,
+                http.client.HTTPException):
             # LibreHardwareMonitor restarted or is briefly unreachable:
             # keep showing the last good value rather than dying.
             pass
@@ -284,6 +291,21 @@ def run(device, url, sensor_path, sensor_name, interval, debug):
             # LibreHardwareMonitor has been gone for a while (or the sensor
             # vanished): blank rather than show a frozen value as live.
             digits = (BLANK, BLANK, BLANK)
+            # After an LHM restart the sensor may be renamed or reordered, so
+            # try to find it again (at most once per reconnect delay).
+            if time.monotonic() - last_resolve >= RECONNECT_DELAY_SECONDS:
+                last_resolve = time.monotonic()
+                try:
+                    found = pick_cpu_sensor(
+                        list(walk_temperature_sensors(fetch_lhm_tree(url))),
+                        wanted)
+                except (urllib.error.URLError, OSError, ValueError,
+                        http.client.HTTPException):
+                    found = None
+                if found and found != (sensor_path, sensor_name):
+                    sensor_path, sensor_name = found
+                    print(f"Sensor changed, now reading: {sensor_name} "
+                          f"[{' / '.join(sensor_path[:-1])}]", flush=True)
         else:
             digits = temp_to_digits(last_temp)
         try:
@@ -352,25 +374,26 @@ def main(argv=None):
     warned = False
     # --wait  <0 waits forever, 0 fails immediately, N waits up to N seconds.
     deadline = None if args.wait < 0 else time.monotonic() + args.wait
-    while True:
-        try:
-            sensors = list(walk_temperature_sensors(fetch_lhm_tree(args.url)))
-            break
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            if deadline is not None and time.monotonic() >= deadline:
-                print(f"Could not reach LibreHardwareMonitor at {args.url}: "
-                      f"{exc}", file=sys.stderr)
-                print("Start LibreHardwareMonitor and enable "
-                      "Options -> Remote Web Server -> Run.", file=sys.stderr)
-                return 2
-            if not warned:
-                print(f"Waiting for LibreHardwareMonitor at {args.url}...",
-                      flush=True)
-                warned = True
+    try:
+        while True:
             try:
+                sensors = list(walk_temperature_sensors(fetch_lhm_tree(args.url)))
+                break
+            except (urllib.error.URLError, OSError, ValueError,
+                    http.client.HTTPException) as exc:
+                if deadline is not None and time.monotonic() >= deadline:
+                    print(f"Could not reach LibreHardwareMonitor at {args.url}: "
+                          f"{exc}", file=sys.stderr)
+                    print("Start LibreHardwareMonitor and enable "
+                          "Options -> Remote Web Server -> Run.", file=sys.stderr)
+                    return 2
+                if not warned:
+                    print(f"Waiting for LibreHardwareMonitor at {args.url}...",
+                          flush=True)
+                    warned = True
                 time.sleep(RECONNECT_DELAY_SECONDS)
-            except KeyboardInterrupt:
-                return 0
+    except KeyboardInterrupt:
+        return 0
 
     chosen = pick_cpu_sensor(sensors, args.sensor)
     if not chosen:
@@ -409,7 +432,7 @@ def main(argv=None):
                     continue
                 print("Writing to device: Chione E4 display", flush=True)
 
-            run(device, args.url, sensor_path, sensor_name,
+            run(device, args.url, sensor_path, sensor_name, args.sensor,
                 args.interval, args.debug)
 
             # run() only returns when the device was lost; drop it and retry.
