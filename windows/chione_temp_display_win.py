@@ -88,6 +88,10 @@ SENSOR_PREFERENCE = ["Tctl/Tdie", "CPU Package", "Core (Tctl", "CPU Total",
 UPDATE_INTERVAL_SECONDS = 0.5
 RECONNECT_DELAY_SECONDS = 3.0
 
+# If the sensor cannot be read for this long, blank the display instead of
+# freezing the last good value on it (which would look live).
+STALE_AFTER_SECONDS = 5.0
+
 # Any non-digit byte blanks a display position (renders as a dash).
 BLANK = 0x20
 
@@ -122,7 +126,10 @@ def make_update_packet(tens, units, tenths):
 
 def write_report(device, packet):
     """Send a 64-byte report. Windows HID writes need a leading Report ID."""
-    device.write(b"\x00" + packet)
+    # hidapi signals a failed write (e.g. the cooler was unplugged) by
+    # returning -1, not by raising, so turn it into an exception here.
+    if device.write(b"\x00" + packet) < 0:
+        raise OSError("HID write failed")
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +244,14 @@ def open_display():
     if not hid.enumerate(CHIONE_VID, CHIONE_PID):
         return None
     device = hid.device()
-    device.open(CHIONE_VID, CHIONE_PID)
+    try:
+        device.open(CHIONE_VID, CHIONE_PID)
+    except OSError as exc:
+        # Present but not openable yet (still enumerating, or held
+        # exclusively by ZEUS CAST): treat as absent and retry later.
+        print(f"Could not open the display ({exc}).", file=sys.stderr,
+              flush=True)
+        return None
     device.set_nonblocking(True)
     return device
 
@@ -246,6 +260,7 @@ def run(device, url, sensor_path, sensor_name, interval, debug):
     """Drive the display until the device is lost or the user stops it."""
     last_digits = None
     last_temp = None
+    last_good = None
     prev_resp = None
 
     while True:
@@ -253,6 +268,7 @@ def run(device, url, sensor_path, sensor_name, interval, debug):
             temp = read_sensor(url, sensor_path, sensor_name)
             if temp is not None:
                 last_temp = temp
+                last_good = time.monotonic()
         except (urllib.error.URLError, OSError, ValueError):
             # LibreHardwareMonitor restarted or is briefly unreachable:
             # keep showing the last good value rather than dying.
@@ -262,7 +278,14 @@ def run(device, url, sensor_path, sensor_name, interval, debug):
             time.sleep(interval)
             continue
 
-        digits = temp_to_digits(last_temp)
+        stale = (time.monotonic() - last_good
+                 > max(STALE_AFTER_SECONDS, 2 * interval))
+        if stale:
+            # LibreHardwareMonitor has been gone for a while (or the sensor
+            # vanished): blank rather than show a frozen value as live.
+            digits = (BLANK, BLANK, BLANK)
+        else:
+            digits = temp_to_digits(last_temp)
         try:
             write_report(device, make_update_packet(*digits))
             resp = device.read(64)
@@ -280,8 +303,12 @@ def run(device, url, sensor_path, sensor_name, interval, debug):
             prev_resp = resp
 
         if digits != last_digits:
-            print(f"CPU: {last_temp:.1f}C -> display: "
-                  f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
+            if stale:
+                print(f"Cannot read '{sensor_name}' from {url}; display "
+                      "blanked.", file=sys.stderr, flush=True)
+            else:
+                print(f"CPU: {last_temp:.1f}C -> display: "
+                      f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
             last_digits = digits
 
         time.sleep(interval)
@@ -306,7 +333,10 @@ def parse_args(argv):
                    help="wait this long for LibreHardwareMonitor to come up "
                         "instead of failing immediately; use -1 to wait "
                         "forever (recommended when starting at login)")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.interval <= 0:
+        p.error("--interval must be greater than 0")
+    return args
 
 
 def main(argv=None):

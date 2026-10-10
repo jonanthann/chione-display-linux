@@ -140,8 +140,13 @@ UPDATE_INTERVAL_SECONDS = 0.5
 # How long to wait before retrying after the device disappears / isn't found.
 RECONNECT_DELAY_SECONDS = 3.0
 
-# Exit code for permanent misconfiguration (no hwmon sensor, no device
-# permission). The systemd unit uses RestartPreventExitStatus=2 to stop
+# If the CPU sensor cannot be read for this long, blank the display instead
+# of freezing the last good value on it (which would look live).
+STALE_AFTER_SECONDS = 5.0
+
+# Exit code for permanent misconfiguration (no matching hwmon sensor). A
+# missing device permission is retried instead, since at boot it is usually
+# transient (see main). The systemd unit uses RestartPreventExitStatus=2 to stop
 # retrying a hopeless start instead of looping forever.
 EXIT_CONFIG_ERROR = 2
 
@@ -176,7 +181,7 @@ def find_hidraw_device(vid, pid):
     (the HID_ID line, e.g. HID_ID=0003:00001B80:0000B53C) instead of trusting
     an unstable device-node number.
     """
-    vid, pid = vid.upper(), pid.upper()
+    vid, pid = int(vid, 16), int(pid, 16)
     for uevent in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
         try:
             with open(uevent) as f:
@@ -184,7 +189,16 @@ def find_hidraw_device(vid, pid):
         except OSError:
             continue
         for line in content.splitlines():
-            if line.startswith("HID_ID=") and vid in line.upper() and pid in line.upper():
+            if not line.startswith("HID_ID="):
+                continue
+            # Compare the parsed fields, not substrings: "1B80" must match the
+            # vendor field only, never a fragment of some other device's ID.
+            try:
+                _bus, dev_vid, dev_pid = line.split("=", 1)[1].split(":")
+                match = int(dev_vid, 16) == vid and int(dev_pid, 16) == pid
+            except ValueError:
+                continue
+            if match:
                 name = os.path.basename(os.path.dirname(os.path.dirname(uevent)))
                 return "/dev/" + name
     return None
@@ -324,11 +338,13 @@ def run(device_path, temp_path, interval, debug):
 
     last_digits = None
     last_temp = None
+    last_good = None
     prev_resp = None
     try:
         while not _stop:
             try:
                 last_temp = read_temp_celsius(temp_path)
+                last_good = time.monotonic()
             except (OSError, ValueError):
                 # Transient sensor hiccup: reuse the last good reading rather
                 # than crashing. If we never got one, just skip this tick.
@@ -336,7 +352,14 @@ def run(device_path, temp_path, interval, debug):
                     _sleep_interruptible(interval)
                     continue
 
-            digits = temp_to_digits(last_temp)
+            stale = (time.monotonic() - last_good
+                     > max(STALE_AFTER_SECONDS, 2 * interval))
+            if stale:
+                # The sensor has been gone for a while (driver unloaded,
+                # hwmon renumbered): blank rather than show a frozen value.
+                digits = (BLANK, BLANK, BLANK)
+            else:
+                digits = temp_to_digits(last_temp)
             try:
                 os.write(fd, make_update_packet(*digits))
                 resp = _read_response(fd)
@@ -355,8 +378,12 @@ def run(device_path, temp_path, interval, debug):
             # Log only when the shown value changes (avoids ~172k journal
             # lines/day); flush so `systemctl status` isn't block-buffered.
             if digits != last_digits:
-                print(f"CPU: {last_temp:.1f}C -> display: "
-                      f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
+                if stale:
+                    print(f"Cannot read {temp_path}; display blanked.",
+                          file=sys.stderr, flush=True)
+                else:
+                    print(f"CPU: {last_temp:.1f}C -> display: "
+                          f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
                 last_digits = digits
 
             _sleep_interruptible(interval)
@@ -391,7 +418,10 @@ def parse_args(argv):
                    help="list all hidraw devices with USB IDs, then exit")
     p.add_argument("--list-hwmon", action="store_true",
                    help="list all hwmon temperature sensors, then exit")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.interval <= 0:
+        p.error("--interval must be greater than 0")
+    return args
 
 
 def main(argv=None):

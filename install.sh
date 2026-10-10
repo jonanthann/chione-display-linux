@@ -20,6 +20,9 @@ RULE_SRC="$REPO_DIR/udev/70-chione.rules"
 RULE_DST="/etc/udev/rules.d/70-chione.rules"
 UNIT_NAME="chione-temp.service"
 UNIT_DST="$HOME/.config/systemd/user/$UNIT_NAME"
+# $USER is not set in every environment (some containers, su -c, cron), and
+# `set -u` would abort on it.
+USER="${USER:-$(id -un)}"
 VID="1b80"
 PID="b53c"
 
@@ -161,7 +164,9 @@ parse_rule_opts() {
     RULE_GROUP=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --group) RULE_GROUP="${2:-}"; [ -n "$RULE_GROUP" ] || die "--group needs a name"; shift 2 ;;
+            --group) RULE_GROUP="${2:-}"; [ -n "$RULE_GROUP" ] || die "--group needs a name"; shift 2
+                # The name is spliced into a sed expression and a udev rule.
+                [[ "$RULE_GROUP" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "invalid group name: $RULE_GROUP" ;;
             *) die "unknown option: $1" ;;
         esac
     done
@@ -252,12 +257,13 @@ Description=Gamdias Chione E4 temperature display (real CPU temp via hwmon)
 ConditionPathExists=$SCRIPT
 
 [Service]
-ExecStart=$(command -v python3) $SCRIPT
+# Quoted so a checkout path containing spaces stays a single argument.
+ExecStart="$(command -v python3)" "$SCRIPT"
 WorkingDirectory=$REPO_DIR
 Restart=on-failure
 RestartSec=5
 # Stop retrying on permanent misconfiguration (exit code 2): no matching
-# hwmon sensor, or no permission to the device.
+# hwmon sensor. (A missing device permission is retried, not fatal.)
 RestartPreventExitStatus=2
 
 [Install]

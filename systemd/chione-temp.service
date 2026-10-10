@@ -13,7 +13,7 @@ ExecStart=/usr/bin/python3 %h/chione-display-linux/chione_temp_display.py
 Restart=on-failure
 RestartSec=5
 # Stop retrying on permanent misconfiguration (exit code 2): no matching
-# hwmon sensor, or no permission to the device. Fix the cause, then
+# hwmon sensor. (A missing device permission is retried, not fatal.) Fix the cause, then
 # `systemctl --user restart chione-temp.service`.
 RestartPreventExitStatus=2
 
