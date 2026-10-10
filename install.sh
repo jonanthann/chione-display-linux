@@ -236,6 +236,9 @@ cmd_udev() {
 }
 
 cmd_service() {
+    # A user service belongs to the desktop user: under sudo the unit lands in
+    # /root/.config and systemctl --user has no bus, so nothing gets installed.
+    [ "$(id -u)" -ne 0 ] || die "run 'service' without sudo (it is a per-user service)"
     [ -d /run/systemd/system ] || die "systemd is not running on this machine"
     command -v python3 >/dev/null 2>&1 || die "python3 not found: $(pkg_hint python3)"
     [ -f "$SCRIPT" ] || die "missing $SCRIPT"
@@ -244,6 +247,14 @@ cmd_service() {
     # Generated rather than copied so ExecStart carries this checkout's real
     # path: the shipped unit assumes ~/chione-display-linux, which is
     # rarely true.
+    # systemd reads % as a specifier (and $ as a variable in ExecStart), so
+    # escape them in paths that go into the unit.
+    local script_u="${SCRIPT//%/%%}"
+    local repo_u="${REPO_DIR//%/%%}"
+    local py_u
+    py_u="$(command -v python3)"
+    py_u="${py_u//%/%%}"; py_u="${py_u//\$/\$\$}"
+    local script_x="${SCRIPT//%/%%}"; script_x="${script_x//\$/\$\$}"
     cat > "$UNIT_DST" <<EOF
 [Unit]
 Description=Gamdias Chione E4 temperature display (real CPU temp via hwmon)
@@ -254,12 +265,12 @@ Description=Gamdias Chione E4 temperature display (real CPU temp via hwmon)
 # skip the start quietly instead of failing. Without this the interpreter
 # exits 2 for "no such file", which RestartPreventExitStatus=2 below reads as
 # permanent misconfiguration and the service stays dead until reset-failed.
-ConditionPathExists=$SCRIPT
+ConditionPathExists=$script_u
 
 [Service]
 # Quoted so a checkout path containing spaces stays a single argument.
-ExecStart="$(command -v python3)" "$SCRIPT"
-WorkingDirectory=$REPO_DIR
+ExecStart="$py_u" "$script_x"
+WorkingDirectory=$repo_u
 Restart=on-failure
 RestartSec=5
 # Stop retrying on permanent misconfiguration (exit code 2): no matching
@@ -303,6 +314,8 @@ EOF
 cmd_remove() {
     if [ -f "$UNIT_DST" ]; then
         systemctl --user disable --now "$UNIT_NAME" 2>/dev/null || true
+        # disable fails silently without a user bus, so drop the enable symlink by hand
+        rm -f "$(dirname "$UNIT_DST")/default.target.wants/$UNIT_NAME"
         rm -f "$UNIT_DST"
         systemctl --user daemon-reload 2>/dev/null \
             || warn "systemctl --user daemon-reload failed (no user bus?)"
@@ -311,7 +324,7 @@ cmd_remove() {
         warn "no unit at $UNIT_DST"
     fi
     if [ -f "$RULE_DST" ]; then
-        as_root sh -c 'rm -f "$1" && udevadm control --reload-rules' _ "$RULE_DST"
+        as_root sh -c 'rm -f "$1" && udevadm control --reload-rules && udevadm trigger --subsystem-match=hidraw' _ "$RULE_DST"
         ok "removed $RULE_DST"
     else
         warn "no rule at $RULE_DST"

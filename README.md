@@ -329,7 +329,7 @@ script needs editing.
 | `--device PATH` | auto | hidraw node; override auto-discovery for unusual setups |
 | `--hwmon NAME` | auto | pin the hwmon driver; auto tries `k10temp`, `coretemp`, `zenpower` |
 | `--temp-file NAME` | `temp1_input` | which `temp*_input` file to read |
-| `--interval SECONDS` | `0.5` | how often to refresh the display |
+| `--interval SECONDS` | `0.5` | how often to refresh the display (minimum `0.1`) |
 | `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
 | `--list-hidraw` | — | list all HID devices with their USB IDs, then exit |
 | `--list-hwmon` | — | list every hwmon temperature sensor with live values, then exit |
@@ -352,7 +352,7 @@ k10temp   temp3_input   42.2C   Tccd1
 |------|---------|---------|
 | `--url URL` | `http://localhost:8085/data.json` | LibreHardwareMonitor's JSON endpoint |
 | `--sensor NAME` | auto | sensor to display; override the CPU auto-detection |
-| `--interval SECONDS` | `0.5` | how often to refresh the display |
+| `--interval SECONDS` | `0.5` | how often to refresh the display (minimum `0.1`) |
 | `--wait SECONDS` | `0` | wait for LibreHardwareMonitor to come up; `-1` waits forever |
 | `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
 | `--list-sensors` | — | list every temperature sensor LibreHardwareMonitor reports, then exit |

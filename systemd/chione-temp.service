@@ -9,6 +9,11 @@ Description=Gamdias Chione E4 temperature display (real CPU temp via hwmon)
 # directory as ~/chione-display-linux. If you cloned it elsewhere, either
 # fix the path below or let `./install.sh service` generate this unit with
 # the real path.
+#
+# If the repo lives on a removable or late-mounting disk, prefer
+# `./install.sh service`: the unit it generates skips the start quietly
+# (ConditionPathExists) while the disk is missing. This file leaves that out
+# on purpose, so a wrong path above fails loudly instead of doing nothing.
 ExecStart=/usr/bin/python3 %h/chione-display-linux/chione_temp_display.py
 Restart=on-failure
 RestartSec=5

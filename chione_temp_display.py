@@ -136,6 +136,9 @@ HWMON_TEMP_FILE = "temp1_input"
 
 # How often to refresh the display, in seconds.
 UPDATE_INTERVAL_SECONDS = 0.5
+# Floor for --interval: the sensor updates about once a second, so anything
+# faster only floods the USB link with identical writes.
+MIN_INTERVAL_SECONDS = 0.1
 
 # How long to wait before retrying after the device disappears / isn't found.
 RECONNECT_DELAY_SECONDS = 3.0
@@ -334,7 +337,11 @@ def run(device_path, temp_path, interval, debug):
     the way out either way.
     """
     fd = os.open(device_path, os.O_RDWR)
-    os.set_blocking(fd, False)
+    try:
+        os.set_blocking(fd, False)
+    except BaseException:
+        os.close(fd)
+        raise
     print(f"Writing to device: {device_path}", flush=True)
 
     last_digits = None
@@ -422,8 +429,8 @@ def parse_args(argv):
     p.add_argument("--list-hwmon", action="store_true",
                    help="list all hwmon temperature sensors, then exit")
     args = p.parse_args(argv)
-    if args.interval <= 0:
-        p.error("--interval must be greater than 0")
+    if args.interval < MIN_INTERVAL_SECONDS:
+        p.error(f"--interval must be at least {MIN_INTERVAL_SECONDS}")
     return args
 
 
@@ -457,13 +464,19 @@ def main(argv=None):
     print("Ctrl+C to stop.", flush=True)
 
     perm_warned = False
+    absent_warned = False
     while not _stop:
         device_path = args.device or find_hidraw_device(CHIONE_VID, CHIONE_PID)
         if not device_path:
-            print(f"Chione display ({CHIONE_VID}:{CHIONE_PID}) not found - "
-                  "is it plugged in? Retrying...", flush=True)
+            # Print once per absence so an unplugged cooler does not flood
+            # the journal; reset when the device shows up again.
+            if not absent_warned:
+                print(f"Chione display ({CHIONE_VID}:{CHIONE_PID}) not found - "
+                      "is it plugged in? Retrying...", flush=True)
+                absent_warned = True
             _sleep_interruptible(RECONNECT_DELAY_SECONDS)
             continue
+        absent_warned = False
 
         try:
             result = run(device_path, temp_path, args.interval, args.debug)

@@ -87,6 +87,9 @@ SENSOR_PREFERENCE = ["Tctl/Tdie", "CPU Package", "Core (Tctl", "CPU Total",
                      "Package", "CPU"]
 
 UPDATE_INTERVAL_SECONDS = 0.5
+# Floor for --interval: the sensor updates about once a second, so anything
+# faster only floods the USB link with identical writes.
+MIN_INTERVAL_SECONDS = 0.1
 RECONNECT_DELAY_SECONDS = 3.0
 
 # If the sensor cannot be read for this long, blank the display instead of
@@ -270,7 +273,7 @@ def run(device, url, sensor_path, sensor_name, wanted, interval, debug):
     """Drive the display until the device is lost or the user stops it."""
     last_digits = None
     last_temp = None
-    last_good = None
+    last_good = time.monotonic()
     prev_resp = None
     last_resolve = 0.0
 
@@ -286,12 +289,12 @@ def run(device, url, sensor_path, sensor_name, wanted, interval, debug):
             # keep showing the last good value rather than dying.
             pass
 
-        if last_temp is None:
+        stale = (time.monotonic() - last_good
+                 > max(STALE_AFTER_SECONDS, 2 * interval))
+        if last_temp is None and not stale:
             time.sleep(interval)
             continue
 
-        stale = (time.monotonic() - last_good
-                 > max(STALE_AFTER_SECONDS, 2 * interval))
         if stale:
             # LibreHardwareMonitor has been gone for a while (or the sensor
             # vanished): blank rather than show a frozen value as live.
@@ -361,8 +364,8 @@ def parse_args(argv):
                         "instead of failing immediately; use -1 to wait "
                         "forever (recommended when starting at login)")
     args = p.parse_args(argv)
-    if args.interval <= 0:
-        p.error("--interval must be greater than 0")
+    if args.interval < MIN_INTERVAL_SECONDS:
+        p.error(f"--interval must be at least {MIN_INTERVAL_SECONDS}")
     return args
 
 
