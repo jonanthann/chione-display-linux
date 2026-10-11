@@ -7,7 +7,9 @@ on the digital display of a Gamdias Chione E4 AIO liquid cooler, without
 Gamdias's ZEUS CAST software.
 
 The USB HID protocol is identical to the Linux version (see the docstring in
-../chione_temp_display.py for the full reverse-engineered packet layout).
+../chione_temp_display.py for the packet layout, confirmed by analysis of
+ZEUS CAST 3.3.1.4: four digits, decimal point, unit, CPU icon, mode, flashing
+and a checksum).
 Only the two platform-specific pieces differ:
 
   1. Talking to the device. Windows has no /dev/hidraw, so this uses the
@@ -51,6 +53,8 @@ Usage
     python chione_temp_display_win.py --list-sensors   # show sensors + exit
     python chione_temp_display_win.py --sensor "CPU Package"
     python chione_temp_display_win.py --debug          # hexdump replies
+    python chione_temp_display_win.py --mode auto      # alternate CPU / fan rpm
+    python chione_temp_display_win.py --mode fan --fan-sensor "CPU Fan"
 
 Press Ctrl+C to stop; the display is blanked ("--.-") on exit so a frozen
 reading is not mistaken for a live one.
@@ -86,10 +90,15 @@ try:
         UPDATE_INTERVAL_SECONDS,
         DisplayState,
         __version__,
+        add_display_args,
         blank_packet,
+        check_alarm,
+        check_cycle,
         check_interval,
+        do_init,
         format_response,
         make_update_packet,
+        pick_mode,
         run_test_pattern,
         temp_to_digits,
         warn_once,
@@ -187,6 +196,63 @@ def walk_temperature_sensors(node, path=()):
         yield from walk_temperature_sensors(child, here)
 
 
+def walk_fan_sensors(node, path=()):
+    """Yield (full_path, name, rpm) for every fan sensor.
+
+    A leaf is a fan when its "Type" is "Fan" (newer LHM) or, without a Type,
+    when its Value ends in "RPM".
+    """
+    text = node.get("Text") or ""
+    children = node.get("Children") or []
+    here = path + (text,) if text else path
+
+    if not children:
+        value = node.get("Value") or ""
+        kind = node.get("Type")
+        if (kind == "Fan" if kind else value.strip().upper().endswith("RPM")):
+            rpm = parse_value(value)
+            if rpm is not None:
+                yield here, text, rpm
+        return
+
+    for child in children:
+        yield from walk_fan_sensors(child, here)
+
+
+def pick_fan_sensor(fans, wanted=None):
+    """Choose the fan to display from (path, name, rpm) entries.
+
+    With --fan-sensor, match that name or path. Otherwise, like the official
+    app, the first fan whose name starts with "CPU"; failing that the first
+    fan above 0 RPM that is not on a GPU.
+    """
+    if wanted:
+        low = wanted.lower()
+        for path, name, _ in fans:
+            if low in name.lower() or low in "/".join(path).lower():
+                return path, name
+        return None
+    for path, name, _ in fans:
+        if name.lower().startswith("cpu"):
+            return path, name
+    for path, name, rpm in fans:
+        if rpm > 0 and not any(k in part.lower() for part in path
+                               for k in ("gpu", "nvidia", "radeon")):
+            return path, name
+    return None
+
+
+def read_fan(url, path, name, tree=None):
+    """Re-read one fan's current rpm by its path+name (from `tree` if given,
+    else fetched)."""
+    if tree is None:
+        tree = fetch_lhm_tree(url)
+    for spath, sname, rpm in walk_fan_sensors(tree):
+        if spath == path and sname == name:
+            return rpm
+    return None
+
+
 def _is_cpu_path(path):
     return any("cpu" in part.lower() or "ryzen" in part.lower()
                or "intel" in part.lower() for part in path)
@@ -219,9 +285,12 @@ def pick_cpu_sensor(sensors, wanted=None):
     return pool[0] if pool else None
 
 
-def read_sensor(url, path, name):
-    """Re-read one sensor's current value by its path+name."""
-    for spath, sname, celsius in walk_temperature_sensors(fetch_lhm_tree(url)):
+def read_sensor(url, path, name, tree=None):
+    """Re-read one sensor's current value by its path+name (from `tree` if
+    given, else fetched)."""
+    if tree is None:
+        tree = fetch_lhm_tree(url)
+    for spath, sname, celsius in walk_temperature_sensors(tree):
         if spath == path and sname == name:
             return celsius
     return None
@@ -239,6 +308,8 @@ def list_sensors(url):
     for path, name, celsius in walk_temperature_sensors(tree):
         print(f"{celsius:6.1f} C   {name}   [{' / '.join(path[:-1])}]")
         found = True
+    for path, name, rpm in walk_fan_sensors(tree):
+        print(f"{rpm:6.0f} RPM {name}   [{' / '.join(path[:-1])}]")
     if not found:
         print("No temperature sensors found. Is LibreHardwareMonitor running "
               "as administrator?", file=sys.stderr)
@@ -268,28 +339,70 @@ def open_display(warned=None):
     return device
 
 
-def run(device, url, sensor, wanted, interval, debug, warned=None):
+def run(device, url, sensor, wanted, interval, debug, warned=None,
+        mode="cpu", fahrenheit=False, alarm=None, cycle=5.0, fan=None,
+        fan_wanted=None):
     """Drive the display until the device is lost or the user stops it.
 
-    `sensor` is a mutable dict ("path", "name") so a sensor re-resolved here
-    survives reconnects. `warned` is a set of error messages already
-    reported; it is cleared after a successful write.
+    `sensor` and `fan` are mutable dicts ("path", "name") so a source
+    re-resolved here survives reconnects; `fan` is None when there is no fan
+    source (mode fan then needs a dict with path None, which is looked for
+    again). `warned` is a set of error messages already reported; it is
+    cleared after a successful write.
     """
     if warned is None:
         warned = set()
-    state = DisplayState(interval, time.monotonic())
+    start = time.monotonic()
+    states = {"cpu": DisplayState(interval, start, "cpu", fahrenheit, alarm),
+              "fan": DisplayState(interval, start, "fan")}
     prev_resp = None
+
+    try:
+        # The reply is optional: the display works without the init.
+        do_init(lambda pkt: write_report(device, pkt),
+                lambda: bytes(device.read(64, 500) or b""), debug)
+    except (OSError, ValueError) as exc:
+        warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
+        return "lost"
 
     while True:
         try:
-            state.reading(read_sensor(url, sensor["path"], sensor["name"]),
-                          time.monotonic())
+            # One fetch per cycle, shared by the cpu and fan readings.
+            tree = fetch_lhm_tree(url)
+            states["cpu"].reading(
+                read_sensor(url, sensor["path"], sensor["name"], tree),
+                time.monotonic())
+            if fan is not None and fan["path"]:
+                states["fan"].reading(
+                    read_fan(url, fan["path"], fan["name"], tree),
+                    time.monotonic())
         except (urllib.error.URLError, OSError, ValueError,
                 http.client.HTTPException):
             # LibreHardwareMonitor restarted or is briefly unreachable:
             # keep showing the last good value rather than dying.
             pass
 
+        # In auto, a dead fan keeps the display on cpu, but it is still
+        # looked for again so it can rejoin the cycle.
+        now = time.monotonic()
+        fan_stale = fan is not None and states["fan"].is_stale(now)
+        if (mode == "auto" and fan_stale
+                and states["fan"].resolve_due(now)):
+            try:
+                found = pick_fan_sensor(
+                    list(walk_fan_sensors(fetch_lhm_tree(url))), fan_wanted)
+            except (urllib.error.URLError, OSError, ValueError,
+                    http.client.HTTPException):
+                found = None
+            if found and found != (fan["path"], fan["name"]):
+                fan["path"], fan["name"] = found
+                print(f"Sensor changed, now reading: {fan['name']} "
+                      f"[{' / '.join(fan['path'][:-1])}]", flush=True)
+        current = pick_mode(mode, now, start, cycle,
+                            fan is not None and bool(fan["path"])
+                            and not fan_stale)
+        state = states[current]
+        source = fan if current == "fan" else sensor
         stale = state.is_stale(time.monotonic())
         if state.idle(stale):
             time.sleep(interval)
@@ -302,22 +415,28 @@ def run(device, url, sensor, wanted, interval, debug, warned=None):
         # most once per reconnect delay).
         if stale and state.resolve_due(time.monotonic()):
             try:
-                sensors = list(walk_temperature_sensors(fetch_lhm_tree(url)))
-                found = pick_cpu_sensor(sensors, wanted)
-                # Without --sensor, a CPU sensor must not be replaced by
-                # the non-CPU fallback (it would stick to it).
-                if (found and not wanted and _is_cpu_path(sensor["path"])
-                        and not _is_cpu_path(found[0])):
-                    found = None
+                if current == "fan":
+                    found = pick_fan_sensor(
+                        list(walk_fan_sensors(fetch_lhm_tree(url))),
+                        fan_wanted)
+                else:
+                    sensors = list(walk_temperature_sensors(
+                        fetch_lhm_tree(url)))
+                    found = pick_cpu_sensor(sensors, wanted)
+                    # Without --sensor, a CPU sensor must not be replaced by
+                    # the non-CPU fallback (it would stick to it).
+                    if (found and not wanted and _is_cpu_path(sensor["path"])
+                            and not _is_cpu_path(found[0])):
+                        found = None
             except (urllib.error.URLError, OSError, ValueError,
                     http.client.HTTPException):
                 found = None
-            if found and found != (sensor["path"], sensor["name"]):
-                sensor["path"], sensor["name"] = found
-                print(f"Sensor changed, now reading: {sensor['name']} "
-                      f"[{' / '.join(sensor['path'][:-1])}]", flush=True)
+            if found and found != (source["path"], source["name"]):
+                source["path"], source["name"] = found
+                print(f"Sensor changed, now reading: {source['name']} "
+                      f"[{' / '.join(source['path'][:-1])}]", flush=True)
         try:
-            write_report(device, make_update_packet(*digits))
+            write_report(device, state.packet(stale))
             resp = device.read(64)
         except (OSError, ValueError) as exc:
             warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
@@ -333,8 +452,11 @@ def run(device, url, sensor, wanted, interval, debug, warned=None):
             prev_resp = resp
 
         if state.log_due(digits, stale, time.monotonic(), debug):
-            if stale:
-                print(f"Cannot read '{sensor['name']}' from {url}; display "
+            if stale and source["name"] is None:
+                print("Cannot read: no fan sensor found; display blanked.",
+                      file=sys.stderr, flush=True)
+            elif stale:
+                print(f"Cannot read '{source['name']}' from {url}; display "
                       "blanked.", file=sys.stderr, flush=True)
             else:
                 print(state.shown_text(digits), flush=True)
@@ -387,12 +509,16 @@ def parse_args(argv):
     p.add_argument("--sensor", default=None,
                    help="sensor name to display (default: auto-detect the "
                         "CPU package/Tctl sensor)")
+    add_display_args(p)
+    p.add_argument("--fan-sensor", default=None, metavar="NAME",
+                   help="fan sensor name to display (default: the first fan "
+                        "whose name starts with CPU)")
     p.add_argument("--interval", type=float, default=UPDATE_INTERVAL_SECONDS,
                    help="seconds between updates (default: %(default)s)")
     p.add_argument("--debug", action="store_true",
                    help="hexdump the device's response report (for RE work)")
     p.add_argument("--list-sensors", action="store_true",
-                   help="list every temperature sensor, then exit")
+                   help="list every temperature and fan sensor, then exit")
     p.add_argument("--wait", type=float, default=0.0, metavar="SECONDS",
                    help="wait this long for LibreHardwareMonitor to come up "
                         "instead of failing immediately; use -1 to wait "
@@ -407,6 +533,8 @@ def parse_args(argv):
                    version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
     check_interval(p, args.interval)
+    check_cycle(p, args.cycle)
+    check_alarm(p, args.alarm)
     if args.wait < 0 and args.wait != -1:
         p.error("--wait must be -1 (forever) or >= 0")
     return args
@@ -484,6 +612,28 @@ def main(argv=None):
               file=sys.stderr)
     print(f"Reading temperature from: {sensor_name} "
           f"[{' / '.join(sensor_path[:-1])}]", flush=True)
+    fan = None
+    if args.mode in ("fan", "auto"):
+        try:
+            found = pick_fan_sensor(
+                list(walk_fan_sensors(fetch_lhm_tree(args.url))),
+                args.fan_sensor)
+        except (urllib.error.URLError, OSError, ValueError,
+                http.client.HTTPException):
+            found = None
+        if found:
+            fan = {"path": found[0], "name": found[1]}
+            print(f"Reading fan rpm from: {found[1]} "
+                  f"[{' / '.join(found[0][:-1])}]", flush=True)
+        elif args.mode == "fan":
+            fan = {"path": None, "name": None}
+            print("No fan sensor found (see --list-sensors); the display "
+                  "stays blank until one appears.", file=sys.stderr,
+                  flush=True)
+        else:
+            fan = {"path": None, "name": None}
+            print("No fan sensor found (see --list-sensors); showing the "
+                  "CPU temperature only.", file=sys.stderr, flush=True)
     print("Ctrl+C to stop.", flush=True)
 
     device = None
@@ -502,7 +652,9 @@ def main(argv=None):
                 warn_once(warned, WRITING_MSG)
 
             run(device, args.url, sensor, args.sensor,
-                args.interval, args.debug, warned)
+                args.interval, args.debug, warned, args.mode,
+                args.fahrenheit, args.alarm, args.cycle, fan,
+                args.fan_sensor)
 
             # run() only returns when the device was lost; drop it and retry.
             try:
@@ -517,7 +669,7 @@ def main(argv=None):
         if device is not None:
             # Blank the display so a frozen value isn't mistaken for a live one.
             try:
-                write_report(device, blank_packet())
+                write_report(device, blank_packet(args.mode == "fan"))
             except OSError:
                 pass
             try:

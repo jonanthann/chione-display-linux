@@ -175,11 +175,13 @@ class RunBase(Base):
                   mock.patch.object(m, "_read_response", lambda fd: None)):
             p.start(); self.addCleanup(p.stop)
 
-    def packets(self):
+    def packets(self, with_init=False):
         with open(self.dev, "rb") as f:
             data = f.read()
         self.assertEqual(len(data) % 64, 0)
-        return [data[i:i + 64] for i in range(0, len(data), 64)]
+        pkts = [data[i:i + 64] for i in range(0, len(data), 64)]
+        # Every run() starts with the 0xFF init packet; hide it by default.
+        return pkts if with_init else [p for p in pkts if p[2] != 0xFF]
 
     def shown(self):
         return [tuple(p[4:7]) for p in self.packets()]
@@ -494,7 +496,7 @@ class TestWarnDedup(RunBase):
         # abertura 3 funciona; a 2a escrita falha (lost); depois volta a falhar
         def fake_write(fd, data):
             st["writes"] += 1
-            if st["writes"] == 2:
+            if st["writes"] == 3:  # 1 = init, 2 = first update
                 raise OSError(errno.EIO, "io")
             return real_write(fd, data)
         out = io.StringIO()

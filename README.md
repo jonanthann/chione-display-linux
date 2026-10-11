@@ -111,16 +111,29 @@ protocol; this has not been tested against them.
 
 ## Current limitations
 
-- Only the digit-display "temperature" mode has been reverse engineered.
-  Other modes the hardware may support (fan RPM, coolant temperature, custom
-  images) are not implemented here.
-- The display format is fixed at `TT.T` (two whole digits plus one decimal),
-  clamped between 0.0 and 99.9 °C.
+- The display only has two modes, CPU (temperature) and FAN (RPM). There is
+  no brightness, color, GPU or other mode to drive.
+- The cooler does not report its own fan speed. The RPM shown comes from the
+  motherboard (the `CPU_FAN` header), read through `hwmon` on Linux and
+  LibreHardwareMonitor on Windows.
+- On Linux, many Gigabyte boards (including the A520M AORUS ELITE) need the
+  out-of-tree `it87` driver
+  ([frankcrawford/it87](https://github.com/frankcrawford/it87), installable
+  through DKMS) before `fanN_input` shows up in `hwmon`.
+- Without a fan source, `--mode auto` stays on `cpu`.
 
 ## Protocol notes
 
 The full reverse-engineered packet layout is documented in the docstring at
 the top of [`chione_temp_display.py`](chione_temp_display.py).
+
+The layout started from the `usbmon` capture described above. It was later
+confirmed in full by static analysis of ZEUS CAST 3.3.1.4 (decompiling the
+.NET assemblies, without running it). That showed the packet carries the
+display digits, the decimal point, the unit (°C or °F), the CPU icon, the
+mode (CPU or FAN) and a flash flag used for the temperature alarm. Byte 12
+is a checksum, the sum of bytes 0 to 11 modulo 256, so the script now
+calculates it for every packet instead of sending a fixed value.
 
 ## Setup (Linux)
 
@@ -213,6 +226,7 @@ Both alternatives are documented in the rule file itself.
 ```bash
 python3 chione_temp_display.py                    # auto-detects everything
 python3 chione_temp_display.py --hwmon coretemp   # pin a driver, if needed
+python3 chione_temp_display.py --mode auto        # alternate CPU temperature and fan RPM
 ```
 
 Run it from the cloned repository. If you copy the script elsewhere (manual
@@ -236,7 +250,7 @@ If something isn't found, list what the machine actually has:
 
 ```bash
 python3 chione_temp_display.py --list-hidraw   # HID devices + USB IDs
-python3 chione_temp_display.py --list-hwmon    # temperature sensors
+python3 chione_temp_display.py --list-hwmon    # temperature and fan sensors
 ```
 
 ### 3. (Optional) Run it automatically on login
@@ -252,6 +266,7 @@ To pass options to the script, put them after `--`:
 
 ```bash
 ./install.sh service -- --hwmon coretemp --interval 1
+./install.sh service -- --mode auto --alarm 90
 ```
 
 They are saved as `CHIONE_ARGS` in `~/.config/chione-temp.conf`, which the
@@ -412,9 +427,15 @@ script needs editing.
 | `--hwmon NAME` | auto | pin the hwmon driver; auto tries `k10temp`, `coretemp`, `zenpower` |
 | `--temp-file NAME` | `temp1_input` | which `temp*_input` file to read |
 | `--interval SECONDS` | `0.5` | how often to refresh the display (between `0.1` and `60`) |
-| `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
+| `--mode cpu\|fan\|auto` | `cpu` | show CPU temperature, fan RPM, or both alternating |
+| `--cycle SECONDS` | `5` | with `--mode auto`, seconds on each mode (between `1` and `60`) |
+| `--fahrenheit` | off | show Fahrenheit in cpu mode |
+| `--alarm CELSIUS` | off | flash the display when the CPU temperature reaches this value |
+| `--fan-hwmon DRIVER` | auto | hwmon driver for the fan RPM; auto takes the first CPU-labelled fan of a motherboard driver, ignoring GPUs |
+| `--fan-input FILE` | auto | which `fan*_input` file to read, e.g. `fan2_input` |
+| `--debug` | off | hexdump the device's reply |
 | `--list-hidraw` | off | list all HID devices with their USB IDs, then exit |
-| `--list-hwmon` | off | list every hwmon temperature sensor with live values, then exit |
+| `--list-hwmon` | off | list every hwmon temperature and fan sensor with live values, then exit |
 | `--test` | off | show `88.8`, then `12.3` (2 s each), blank and exit; no sensor needed |
 | `--version` | off | print the version and exit |
 
@@ -438,8 +459,13 @@ k10temp   temp3_input   42.2C   Tccd1
 | `--sensor NAME` | auto | sensor to display; override the CPU auto-detection |
 | `--interval SECONDS` | `0.5` | how often to refresh the display (between `0.1` and `60`) |
 | `--wait SECONDS` | `0` | wait for LibreHardwareMonitor to come up; `-1` waits forever; other negative values are rejected |
-| `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
-| `--list-sensors` | off | list every temperature sensor LibreHardwareMonitor reports, then exit |
+| `--mode cpu\|fan\|auto` | `cpu` | show CPU temperature, fan RPM, or both alternating |
+| `--cycle SECONDS` | `5` | with `--mode auto`, seconds on each mode (between `1` and `60`) |
+| `--fahrenheit` | off | show Fahrenheit in cpu mode |
+| `--alarm CELSIUS` | off | flash the display when the CPU temperature reaches this value |
+| `--fan-sensor NAME` | auto | fan sensor to display; auto takes the first fan whose name starts with `CPU` |
+| `--debug` | off | hexdump the device's reply |
+| `--list-sensors` | off | list every temperature and fan sensor LibreHardwareMonitor reports, then exit |
 | `--test` | off | show `88.8`, then `12.3` (2 s each), blank and exit; no LibreHardwareMonitor needed |
 | `--log-file PATH` | off | append stdout and stderr to PATH (for `pythonw`); rotated to `PATH.1` above 1 MB |
 | `--version` | off | print the version and exit |

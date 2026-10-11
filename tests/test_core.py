@@ -53,8 +53,8 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(st.is_stale(c.STALE_AFTER_SECONDS + 0.1))
         st.reading(50.0, 1.0)
         self.assertFalse(st.is_stale(2.0))
-        self.assertEqual(st.digits(False), (5, 0, 0))
-        self.assertEqual(st.digits(True), (c.BLANK,) * 3)
+        self.assertEqual(st.digits(False), (c.BLANK, 5, 0, 0))
+        self.assertEqual(st.digits(True), (c.BLANK,) * 4)
         st.reading(None, 3.0)
         self.assertEqual(st.last_good, 1.0)
 

@@ -27,45 +27,42 @@ enumeration order and changes across reboots and replugs. The USB VID:PID is
 stable, so by default this script auto-discovers the node by scanning
 /sys/class/hidraw for the device matching 1b80:b53c (see find_hidraw_device).
 
-Protocol (reverse engineered, digit display mode only)
--------------------------------------------------------
+Protocol (confirmed by static analysis of ZEUS CAST 3.3.1.4)
+------------------------------------------------------------
 64-byte USB HID Interrupt OUT report, no Report ID, sent periodically to
 keep the display alive and updated:
 
     byte 0-1   : 0x3a 0xb5     fixed header / magic bytes
     byte 2     : 0x01          command: "update display"
-                                (0xff was observed once, at device startup,
-                                as a distinct "init" variant; not required
-                                for basic continuous use)
-    byte 3     : 0x20          fixed in every capture (exact purpose not
-                                confirmed, possibly a length/sub-command
-                                field)
-    byte 4     : tens digit    0-9 shows that digit; any other value
-                                (e.g. 0x20) blanks the position (shown as a
-                                dash on the display)
-    byte 5     : units digit   same rule as byte 4
-    byte 6     : decimal digit same rule as byte 4 (shown after the
-                                decimal point)
-    byte 7     : 0x01          fixed in every capture
-    byte 8-11  : 01 01 00 00   fixed in every capture
-    byte 12-15 : 13 00 00 00   fixed in every capture (varies slightly
-                                between the init/update variants seen;
-                                exact meaning not confirmed)
-    byte 16-63 : 0x00          padding, always zero in every capture
+                                (0xff = init/"get", see below)
+    byte 3-6   : four digits   0-9 shows that digit; 0x20 blanks the
+                                position (shown as a dash). Temperature:
+                                hundreds (0x20 below 100), tens, units,
+                                tenths. Fan: thousands (0x20 below 1000),
+                                hundreds, tens, units.
+    byte 7     : decimal point 1 on (temperature), 0 off (fan)
+    byte 8     : unit          1 = Celsius, 0 = Fahrenheit (0 in fan mode)
+    byte 9     : CPU icon      1 in CPU mode, 0 in fan mode
+    byte 10    : mode          0 = CPU temperature, 1 = FAN rpm
+    byte 11    : flashing      1 makes the display blink (the temperature
+                                alarm; only used in CPU mode)
+    byte 12    : checksum      sum(bytes 0..11) & 0xff
+    byte 13-63 : 0x00          padding
 
-Input report (device -> host)
------------------------------
-The device returns a 64-byte report after every OUT packet. Its contents are
-NOT yet decoded: it may be a bare ACK, or it may carry telemetry (pump/fan
-RPM, coolant temp) the way many other AIO HID protocols do. Run with --debug
-to hexdump it and watch which bytes move when fan/pump speed changes; that is
-the cheapest lead for decoding the unmapped fan-RPM feature. The read is
-gated with select() and a timeout so a device that ever stops replying can
-never hang the loop.
+Examples: 00.0 C is `3a b5 01 20 00 00 00 01 01 01 00 00 13`; 1450 RPM is
+`3a b5 01 01 04 05 00 00 00 00 01 00 fb`. The earlier captures only ever
+showed the checksum 0x13 (correct for 00.0 only), and the firmware appears
+not to validate it (the fixed 0x13 worked for every temperature), but the
+correct checksum is computed anyway.
 
-Only the temperature-digit display mode has been mapped so far. Other modes
-the hardware may support (fan RPM, coolant temperature, custom images) have
-not been captured or decoded.
+Init: ZEUS CAST sends `3a b5 ff 20 20 20 20 00 01 01 00 00 70` once and reads
+one 64-byte reply: bytes 3-4 are the firmware version (high, low), byte 5 the
+unit saved in the device (1 = Celsius), byte 6 = 1 in CPU mode, byte 7 = 1 in
+FAN mode. This script sends it on connect but does not depend on the reply
+(run with --debug to see it). The device returns a 64-byte report after
+every OUT packet; the app ignores it, and so do we apart from --debug. The
+read is gated with select() and a timeout so a silent device can never hang
+the loop.
 
 Requirements
 ------------
@@ -88,6 +85,8 @@ Usage
     python3 chione_temp_display.py --list-hidraw     # list HID devices + exit
     python3 chione_temp_display.py --list-hwmon      # list temp sensors + exit
     python3 chione_temp_display.py --debug           # hexdump device replies
+    python3 chione_temp_display.py --mode auto       # alternate CPU / fan rpm
+    python3 chione_temp_display.py --fahrenheit --alarm 85
 
 Runs until interrupted (Ctrl+C or SIGTERM), or use
 systemd/chione-temp.service to run it automatically in the background. On any
@@ -116,10 +115,15 @@ try:
         UPDATE_INTERVAL_SECONDS,
         DisplayState,
         __version__,
+        add_display_args,
         blank_packet,
+        check_alarm,
+        check_cycle,
         check_interval,
+        do_init,
         format_response,
         make_update_packet,
+        pick_mode,
         run_test_pattern,
         temp_to_digits,
         warn_once,
@@ -157,6 +161,10 @@ HWMON_CANDIDATES = ("k10temp", "coretemp", "zenpower")
 # motherboard/chipset. Cross check with `sensors` (lm_sensors) if readings
 # look wrong.
 HWMON_TEMP_FILE = "temp1_input"
+
+# GPU drivers whose fans are ignored by default (the app wants the CPU fan
+# header of the motherboard). Name one with --fan-hwmon to use it anyway.
+GPU_HWMON_DRIVERS = ("amdgpu", "nouveau", "radeon", "i915", "xe", "nvidia")
 
 # Exit code for permanent misconfiguration (no matching hwmon sensor). A
 # missing device permission is retried instead, since at boot it is usually
@@ -252,12 +260,13 @@ def find_hwmon_temp_path(driver_name, temp_file):
 
 
 def list_hwmon():
-    """Print every hwmon temperature sensor with its driver name and label.
+    """Print every hwmon temperature and fan sensor with driver and label.
 
     The Linux counterpart of the Windows script's --list-sensors: it answers
     "which --hwmon should I pass?" directly, instead of making the user
     assemble a shell loop over sysfs.
     """
+    default_fan = resolve_hwmon_fan()[0]
     for hwmon_dir in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
         try:
             with open(os.path.join(hwmon_dir, "name")) as f:
@@ -279,6 +288,67 @@ def list_hwmon():
             marker = (" <- default" if name in HWMON_CANDIDATES
                       and temp_file == HWMON_TEMP_FILE else "")
             print(f"{name}\t{temp_file}\t{value}\t{label}{marker}")
+        for fan_input in _fan_files(hwmon_dir):
+            label = _read_text(fan_input.replace("_input", "_label"))
+            try:
+                value = f"{read_fan_rpm(fan_input)}RPM"
+            except (OSError, ValueError):
+                value = "n/a"
+            # Not "default$": install.sh greps that for the CPU sensor.
+            marker = " <- default fan" if fan_input == default_fan else ""
+            print(f"{name}\t{os.path.basename(fan_input)}\t{value}\t"
+                  f"{label}{marker}")
+
+
+def _read_text(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _fan_files(hwmon_dir):
+    """fan*_input files of a hwmon dir, in numeric order."""
+    files = glob.glob(os.path.join(hwmon_dir, "fan*_input"))
+    return sorted(files, key=lambda f: (len(os.path.basename(f)), f))
+
+
+def read_fan_rpm(path):
+    with open(path) as f:
+        return int(f.read().strip())
+
+
+def resolve_hwmon_fan(driver=None, fan_input=None):
+    """Return (path, driver_name) of the fan to show, or (None, None).
+
+    Like the official app (first fan named "CPU..."): prefer a fanN_label
+    starting with "cpu" (case-insensitive), otherwise the first fan with a
+    value above 0. GPU drivers are skipped unless named with `driver`. With
+    `fan_input` only that file is considered, and it is used as soon as it
+    exists, whatever its value.
+    """
+    first_live = None
+    for hwmon_dir in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        name = _read_text(os.path.join(hwmon_dir, "name"))
+        if not name or (driver and name != driver) or (
+                not driver and name in GPU_HWMON_DRIVERS):
+            continue
+        for path in _fan_files(hwmon_dir):
+            if fan_input and os.path.basename(path) != fan_input:
+                continue
+            if fan_input:
+                return path, name
+            label = _read_text(path.replace("_input", "_label"))
+            if label.lower().startswith("cpu"):
+                return path, name
+            if first_live is None:
+                try:
+                    if read_fan_rpm(path) > 0:
+                        first_live = (path, name)
+                except (OSError, ValueError):
+                    pass
+    return first_live or (None, None)
 
 
 def resolve_hwmon_temp_path(driver_name, temp_file):
@@ -302,13 +372,13 @@ def read_temp_celsius(path):
     return milli_c / 1000.0
 
 
-def _read_response(fd):
+def _read_response(fd, timeout=0.2):
     """Non-blocking read of the device's reply, or None if none is ready.
 
     Gated with select() so a device that stops replying can never hang the
     loop (the reply is unused for display; it's only interesting for --debug).
     """
-    r, _, _ = select.select([fd], [], [], 0.2)
+    r, _, _ = select.select([fd], [], [], timeout)
     if not r:
         return None
     try:
@@ -317,14 +387,18 @@ def _read_response(fd):
         return None
 
 
-def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None):
+def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None,
+        mode="cpu", fahrenheit=False, alarm=None, cycle=5.0, fan=None,
+        fan_hwmon=None, fan_input=None):
     """Drive the display until the device is lost or a stop is requested.
 
     Returns "stop" on a clean shutdown request, or "lost" if the device
     disappeared (so the caller can wait and reconnect). Blanks the display on
-    the way out either way. `sensor` is a mutable dict ("path", "name") so a
-    sensor re-resolved here survives reconnects. `warned` is a set of error
-    messages already reported; it is cleared after a successful write.
+    the way out either way. `sensor` and `fan` are mutable dicts ("path",
+    "name") so a source re-resolved here survives reconnects; `fan` is None
+    when there is no fan source (mode fan then needs a dict with path None,
+    which is looked for again). `warned` is a set of error messages already
+    reported; it is cleared after a successful write.
     """
     if warned is None:
         warned = set()
@@ -336,35 +410,71 @@ def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None):
         raise
     warn_once(warned, f"Writing to device: {device_path}")
 
-    state = DisplayState(interval, time.monotonic())
+    start = time.monotonic()
+    states = {"cpu": DisplayState(interval, start, "cpu", fahrenheit, alarm),
+              "fan": DisplayState(interval, start, "fan")}
     prev_resp = None
     try:
+        try:
+            # The reply is optional: the display works without the init.
+            do_init(lambda pkt: os.write(fd, pkt), lambda: _read_response(fd),
+                    debug)
+        except OSError as exc:
+            warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
+            return "lost"
         while not _stop:
             try:
-                state.reading(read_temp_celsius(sensor["path"]),
-                              time.monotonic())
+                states["cpu"].reading(read_temp_celsius(sensor["path"]),
+                                      time.monotonic())
             except (OSError, ValueError):
                 # Transient sensor hiccup: reuse the last good reading rather
                 # than crashing. With none yet, show nothing until stale.
                 pass
+            if fan is not None and fan["path"]:
+                try:
+                    states["fan"].reading(read_fan_rpm(fan["path"]),
+                                          time.monotonic())
+                except (OSError, ValueError):
+                    pass
 
+            # In auto, a dead fan keeps the display on cpu, but it is still
+            # looked for again so it can rejoin the cycle.
+            now = time.monotonic()
+            fan_stale = fan is not None and states["fan"].is_stale(now)
+            if (mode == "auto" and fan_stale
+                    and states["fan"].resolve_due(now)):
+                new_path, new_name = resolve_hwmon_fan(fan_hwmon, fan_input)
+                if new_path and new_path != fan["path"]:
+                    fan["path"], fan["name"] = new_path, new_name
+                    print(f"Sensor changed, now reading: {new_path} "
+                          f"({new_name})", flush=True)
+            current = pick_mode(mode, now, start, cycle,
+                                fan is not None and bool(fan["path"])
+                                and not fan_stale)
+            state = states[current]
+            source = fan if current == "fan" else sensor
             stale = state.is_stale(time.monotonic())
             if state.idle(stale):
                 # Never read yet and not stale: leave the display untouched.
                 _sleep_interruptible(interval)
                 continue
             digits = state.digits(stale)
-            # If the sensor has been gone for a while (driver unloaded, hwmon
+            # If the source has been gone for a while (driver unloaded, hwmon
             # renumbered) the display is blanked rather than frozen, and the
-            # sensor is looked for again, at most once per reconnect delay.
+            # source is looked for again, at most once per reconnect delay.
             if stale and state.resolve_due(time.monotonic()):
-                new_path, new_name = resolve_hwmon_temp_path(hwmon, temp_file)
-                if new_path and new_path != sensor["path"]:
-                    sensor["path"], sensor["name"] = new_path, new_name
+                if current == "fan":
+                    new_path, new_name = resolve_hwmon_fan(fan_hwmon,
+                                                           fan_input)
+                else:
+                    new_path, new_name = resolve_hwmon_temp_path(hwmon,
+                                                                 temp_file)
+                if new_path and new_path != source["path"]:
+                    source["path"], source["name"] = new_path, new_name
                     print(f"Sensor changed, now reading: {new_path} "
                           f"({new_name})", flush=True)
             try:
-                os.write(fd, make_update_packet(*digits))
+                os.write(fd, state.packet(stale))
                 resp = _read_response(fd)
             except OSError as exc:
                 warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
@@ -381,7 +491,8 @@ def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None):
             # Flush so `systemctl status` isn't block-buffered.
             if state.log_due(digits, stale, time.monotonic(), debug):
                 if stale:
-                    print(f"Cannot read {sensor['path']}; display blanked.",
+                    what = source["path"] or "no fan sensor found"
+                    print(f"Cannot read {what}; display blanked.",
                           file=sys.stderr, flush=True)
                 else:
                     print(state.shown_text(digits), flush=True)
@@ -390,7 +501,7 @@ def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None):
     finally:
         # Blank the display so a frozen value isn't mistaken for a live one.
         try:
-            os.write(fd, blank_packet())
+            os.write(fd, blank_packet(mode == "fan"))
         except OSError:
             pass
         os.close(fd)
@@ -431,10 +542,17 @@ def parse_args(argv):
                    help="seconds between updates (default: %(default)s)")
     p.add_argument("--debug", action="store_true",
                    help="hexdump the device's response report (for RE work)")
+    add_display_args(p)
+    p.add_argument("--fan-hwmon", default=None, metavar="DRIVER",
+                   help="hwmon driver for the fan rpm (default: the first "
+                        "CPU-labelled fan of a motherboard driver, GPUs "
+                        "ignored)")
+    p.add_argument("--fan-input", default=None, metavar="FILE",
+                   help="fan*_input file to read, e.g. fan2_input")
     p.add_argument("--list-hidraw", action="store_true",
                    help="list all hidraw devices with USB IDs, then exit")
     p.add_argument("--list-hwmon", action="store_true",
-                   help="list all hwmon temperature sensors, then exit")
+                   help="list all hwmon temperature and fan sensors, then exit")
     p.add_argument("--test", action="store_true",
                    help="show 88.8 then 12.3 for 2s each, blank and exit "
                         "(no sensor needed)")
@@ -442,6 +560,8 @@ def parse_args(argv):
                    version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
     check_interval(p, args.interval)
+    check_cycle(p, args.cycle)
+    check_alarm(p, args.alarm)
     return args
 
 
@@ -496,6 +616,20 @@ def main(argv=None):
     print("Ctrl+C to stop.", flush=True)
 
     sensor = {"path": temp_path, "name": hwmon_name}
+    fan = None
+    if args.mode in ("fan", "auto"):
+        fan_path, fan_name = resolve_hwmon_fan(args.fan_hwmon, args.fan_input)
+        if fan_path:
+            fan = {"path": fan_path, "name": fan_name}
+            print(f"Reading fan rpm from: {fan_path} ({fan_name})", flush=True)
+        elif args.mode == "fan":
+            fan = {"path": None, "name": None}
+            print("No fan sensor found (see --list-hwmon); the display stays "
+                  "blank until one appears.", file=sys.stderr, flush=True)
+        else:
+            fan = {"path": None, "name": None}
+            print("No fan sensor found (see --list-hwmon); showing the CPU "
+                  "temperature only.", file=sys.stderr, flush=True)
     perm_warned = False
     absent_warned = False
     warned = set()
@@ -514,7 +648,9 @@ def main(argv=None):
 
         try:
             result = run(device_path, sensor, args.hwmon, args.temp_file,
-                         args.interval, args.debug, warned)
+                         args.interval, args.debug, warned, args.mode,
+                         args.fahrenheit, args.alarm, args.cycle, fan,
+                         args.fan_hwmon, args.fan_input)
         except PermissionError:
             # Transient at boot: when this starts as a user service, the
             # logind uaccess ACL may not be applied to the node yet, so the
