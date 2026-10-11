@@ -1,4 +1,10 @@
-import contextlib, importlib.util, io, os, sys, unittest, urllib.error
+import contextlib
+import importlib.util
+import io
+import os
+import sys
+import unittest
+import urllib.error
 from types import ModuleType
 from unittest import mock
 
@@ -73,9 +79,10 @@ class TestWinRun(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(w, "walk_temperature_sensors",
                                lambda tree: iter(found_list)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(Stop):
-                w.run(self.dev, "u", sensor, wanted, 0.5, False)
+             contextlib.redirect_stdout(out), \
+             contextlib.redirect_stderr(io.StringIO()), \
+             self.assertRaises(Stop):
+            w.run(self.dev, "u", sensor, wanted, 0.5, False)
 
     def test_cpu_sensor_not_replaced_by_non_cpu_fallback(self):
         s = {"path": self.CPU, "name": self.CPU[-1]}

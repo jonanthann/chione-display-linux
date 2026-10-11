@@ -1,5 +1,7 @@
 # Chione E4 Temperature Display
 
+[![CI](https://github.com/jonanthann/chione-display-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/jonanthann/chione-display-linux/actions/workflows/ci.yml)
+
 Drive the physical digital display on a Gamdias Chione E4 (and possibly
 other Chione-family) AIO liquid cooler with **real CPU temperature**,
 without Gamdias's ZEUS CAST software.
@@ -124,7 +126,8 @@ your machine and tell you what's missing:
 ./install.sh check       # inspect everything, change nothing
 ./install.sh print-rule  # show the udev rule it would install
 ./install.sh all         # install the udev rule + the systemd user service
-./install.sh remove      # undo both
+./install.sh service -- --hwmon coretemp   # service only, saving script options
+./install.sh remove      # undo both (keeps ~/.config/chione-temp.conf)
 ```
 
 Every line `check` prints is a verdict on one piece of the setup, so a
@@ -205,6 +208,14 @@ name) automatically, with nothing to edit. Your CPU temperature should
 appear on the display within a couple of seconds, updating live, and also
 print in the terminal (only when the shown value changes) for confirmation.
 
+To check the wiring without any sensor, run the self-test: it shows `88.8`,
+then `12.3` (2 s each), blanks the display and exits (exit code `1` if the
+device cannot be opened or written to):
+
+```bash
+python3 chione_temp_display.py --test
+```
+
 If something isn't found, list what the machine actually has:
 
 ```bash
@@ -221,6 +232,27 @@ python3 chione_temp_display.py --list-hwmon    # temperature sensors
 This generates the unit with this checkout's real path, so it works wherever
 you cloned the repo. If no default CPU sensor exists yet, it prints a
 warning first (the service would wait about 60 s and then exit with code 2).
+To pass options to the script, put them after `--`:
+
+```bash
+./install.sh service -- --hwmon coretemp --interval 1
+```
+
+They are saved as `CHIONE_ARGS` in `~/.config/chione-temp.conf`, which the
+unit reads through `EnvironmentFile` (the file is optional). Arguments with
+spaces, quotes, backslashes or empty values are refused. Running
+`./install.sh service` without `--` keeps the existing conf unchanged, and
+`./install.sh remove` does not delete it (remove it by hand if unwanted).
+If a `--hwmon` is saved, the installer checks for that driver instead of the
+default CPU sensors.
+
+To change the options later, edit the conf (a single line such as
+`CHIONE_ARGS="--hwmon coretemp"`) and restart the service:
+
+```bash
+systemctl --user restart chione-temp
+```
+
 By hand instead:
 
 ```bash
@@ -228,6 +260,8 @@ mkdir -p ~/.config/systemd/user
 cp systemd/chione-temp.service ~/.config/systemd/user/
 # The shipped unit assumes the repo is at ~/chione-display-linux. If you
 # cloned it elsewhere, edit the ExecStart path in the copied unit.
+# Optional script options: CHIONE_ARGS="--hwmon NAME" in
+# ~/.config/chione-temp.conf
 systemctl --user daemon-reload
 systemctl --user enable --now chione-temp.service
 ```
@@ -307,6 +341,7 @@ browser: you should see a wall of JSON.
 
 ```powershell
 python windows\chione_temp_display_win.py
+python windows\chione_temp_display_win.py --test   # 88.8, then 12.3, then blank
 ```
 
 The script finds the cooler by its USB ID and picks the CPU sensor on its
@@ -325,9 +360,21 @@ pythonw C:\path\to\chione-display-linux\windows\chione_temp_display_win.py --wai
 `pythonw` runs it without a console window, and `--wait -1` makes it wait
 for LibreHardwareMonitor instead of giving up when it happens to start first.
 
+`pythonw` has no console, so its output is lost. To keep a log, add
+`--log-file`:
+
+```
+pythonw C:\path\to\chione-display-linux\windows\chione_temp_display_win.py --wait -1 --log-file C:\path\to\chione.log
+```
+
+Output (stdout and stderr) is appended to that file. If it is larger than
+1 MB at startup it is moved to `chione.log.1` (replacing any older one)
+and a new file is started. If the log file cannot be opened the script exits
+with code `2`.
+
 ## Configuration
 
-Everything is a command-line flag with a sensible default — nothing in either
+Everything is a command-line flag with a sensible default, nothing in either
 script needs editing.
 
 ### Linux
@@ -339,8 +386,10 @@ script needs editing.
 | `--temp-file NAME` | `temp1_input` | which `temp*_input` file to read |
 | `--interval SECONDS` | `0.5` | how often to refresh the display (between `0.1` and `60`) |
 | `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
-| `--list-hidraw` | — | list all HID devices with their USB IDs, then exit |
-| `--list-hwmon` | — | list every hwmon temperature sensor with live values, then exit |
+| `--list-hidraw` | off | list all HID devices with their USB IDs, then exit |
+| `--list-hwmon` | off | list every hwmon temperature sensor with live values, then exit |
+| `--test` | off | show `88.8`, then `12.3` (2 s each), blank and exit; no sensor needed |
+| `--version` | off | print the version and exit |
 
 Not sure which `--hwmon` to use? `--list-hwmon` prints every sensor with its
 driver, label and current reading, marking the one auto-detection would
@@ -363,17 +412,21 @@ k10temp   temp3_input   42.2C   Tccd1
 | `--interval SECONDS` | `0.5` | how often to refresh the display (between `0.1` and `60`) |
 | `--wait SECONDS` | `0` | wait for LibreHardwareMonitor to come up; `-1` waits forever; other negative values are rejected |
 | `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
-| `--list-sensors` | — | list every temperature sensor LibreHardwareMonitor reports, then exit |
+| `--list-sensors` | off | list every temperature sensor LibreHardwareMonitor reports, then exit |
+| `--test` | off | show `88.8`, then `12.3` (2 s each), blank and exit; no LibreHardwareMonitor needed |
+| `--log-file PATH` | off | append stdout and stderr to PATH (for `pythonw`); rotated to `PATH.1` above 1 MB |
+| `--version` | off | print the version and exit |
 
 ### Exit codes
 
 | Script | Code | Meaning |
 |--------|------|---------|
-| Linux | `0` | stopped normally (Ctrl+C or SIGTERM), or a `--list-*` flag |
+| Linux | `0` | stopped normally (Ctrl+C or SIGTERM), `--test`, `--version` or a `--list-*` flag |
+| Linux | `1` | `--test` could not open or write to the device |
 | Linux | `2` | no CPU hwmon sensor found after waiting up to 60 s at startup (also argparse errors); the systemd unit's `RestartPreventExitStatus=2` uses it to stop restarting |
-| Windows | `0` | stopped normally |
-| Windows | `2` | LibreHardwareMonitor unreachable after `--wait`, or no sensor found |
-| Windows | `1` | `--list-sensors` found no sensors or could not connect |
+| Windows | `0` | stopped normally, or `--test` / `--version` |
+| Windows | `2` | LibreHardwareMonitor unreachable after `--wait`, or no sensor found (also argparse errors, or a `--log-file` that cannot be opened) |
+| Windows | `1` | `--list-sensors` found no sensors or could not connect, or `--test` could not find, open or write to the display |
 
 A missing or inaccessible cooler does not exit: both scripts keep retrying.
 
@@ -422,6 +475,19 @@ Unit tests live in `tests/`. Run them from the repository root:
 ```bash
 python3 -m unittest discover -s tests
 ```
+
+Lint with [ruff](https://docs.astral.sh/ruff/) (configured in `ruff.toml`,
+targeting Python 3.9) and [shellcheck](https://www.shellcheck.net/):
+
+```bash
+pip install ruff==0.17.0
+ruff check .
+shellcheck -S warning install.sh
+```
+
+GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs on every push and
+pull request to `main`: the tests on Ubuntu and Windows with Python 3.9 and
+3.13, plus ruff and shellcheck.
 
 ## Disclaimer
 

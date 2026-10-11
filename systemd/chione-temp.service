@@ -14,7 +14,10 @@ Description=Gamdias Chione E4 temperature display (real CPU temp via hwmon)
 # `./install.sh service`: the unit it generates skips the start quietly
 # (ConditionPathExists) while the disk is missing. This file leaves that out
 # on purpose, so a wrong path above fails loudly instead of doing nothing.
-ExecStart=/usr/bin/python3 %h/chione-display-linux/chione_temp_display.py
+# Extra script options (e.g. --hwmon NAME) go in ~/.config/chione-temp.conf as
+# CHIONE_ARGS="--hwmon NAME"; $CHIONE_ARGS below is split on whitespace.
+EnvironmentFile=-%h/.config/chione-temp.conf
+ExecStart=/usr/bin/python3 %h/chione-display-linux/chione_temp_display.py $CHIONE_ARGS
 Restart=on-failure
 RestartSec=5
 # Stop retrying on permanent misconfiguration (exit code 2): bad arguments, or

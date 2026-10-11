@@ -60,10 +60,13 @@ import argparse
 import http.client
 import json
 import math
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
+
+__version__ = "1.1.0"
 
 try:
     import hid
@@ -105,6 +108,9 @@ LOG_EVERY_SECONDS = 60.0
 
 # Upper bound for --interval (also keeps sleeps finite).
 MAX_INTERVAL_SECONDS = 60.0
+
+# --log-file is rotated to PATH.1 when it is larger than this on startup.
+MAX_LOG_BYTES = 1024 * 1024
 
 # Message kept across successful writes so reconnects do not repeat it.
 WRITING_MSG = "Writing to device: Chione E4 display"
@@ -390,6 +396,46 @@ def run(device, url, sensor, wanted, interval, debug, warned=None):
         time.sleep(interval)
 
 
+def run_test():
+    """Self-test: 88.8 then 12.3 for 2s each, then blank. Returns an exit code."""
+    device = open_display()
+    if device is None:
+        print("Chione display not found or could not be opened.",
+              file=sys.stderr)
+        return 1
+    try:
+        for value in (88.8, 12.3):
+            write_report(device, make_update_packet(*temp_to_digits(value)))
+            print(f"Showing {value}", flush=True)
+            time.sleep(2)
+        write_report(device, make_update_packet(BLANK, BLANK, BLANK))
+    except OSError as exc:
+        print(f"Cannot write to the display: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            device.close()
+        except OSError:
+            pass
+    return 0
+
+
+def redirect_output(path):
+    """Send stdout and stderr to `path` (append, line-buffered).
+
+    For pythonw, which has no console (sys.stdout/stderr are None). A file
+    over MAX_LOG_BYTES is rotated to path.1 first so it cannot grow forever.
+    """
+    try:
+        if os.path.getsize(path) > MAX_LOG_BYTES:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass  # missing file is the normal first run
+    log = open(path, "a", buffering=1, encoding="utf-8", errors="replace")  # noqa: SIM115 (kept open for the process lifetime)
+    sys.stdout = log
+    sys.stderr = log
+
+
 def parse_args(argv):
     p = argparse.ArgumentParser(
         description="Show real CPU temperature on a Gamdias Chione E4 "
@@ -409,6 +455,14 @@ def parse_args(argv):
                    help="wait this long for LibreHardwareMonitor to come up "
                         "instead of failing immediately; use -1 to wait "
                         "forever (recommended when starting at login)")
+    p.add_argument("--test", action="store_true",
+                   help="show 88.8 then 12.3 for 2s each, blank and exit "
+                        "(no sensor needed)")
+    p.add_argument("--log-file", default=None, metavar="PATH",
+                   help="append stdout and stderr to this file (for pythonw, "
+                        "which has no console); rotated to PATH.1 above 1 MB")
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
     if not math.isfinite(args.interval) or not (
             MIN_INTERVAL_SECONDS <= args.interval <= MAX_INTERVAL_SECONDS):
@@ -421,6 +475,17 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.log_file:
+        try:
+            redirect_output(args.log_file)
+        except OSError as exc:
+            print(f"Cannot open log file {args.log_file}: {exc}",
+                  file=sys.stderr)
+            return 2
+
+    if args.test:
+        return run_test()
 
     if args.list_sensors:
         return list_sensors(args.url)

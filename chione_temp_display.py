@@ -104,6 +104,8 @@ import signal
 import sys
 import time
 
+__version__ = "1.1.0"
+
 # ---------------------------------------------------------------------------
 # DEFAULTS (all overridable via command-line flags; see --help)
 # ---------------------------------------------------------------------------
@@ -453,6 +455,27 @@ def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None):
     return "stop"
 
 
+def run_test(device_path):
+    """Self-test: 88.8 then 12.3 for 2s each, then blank. Returns an exit code."""
+    try:
+        fd = os.open(device_path, os.O_RDWR)
+    except OSError as exc:
+        print(f"Cannot open {device_path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        for value in (88.8, 12.3):
+            os.write(fd, make_update_packet(*temp_to_digits(value)))
+            print(f"Showing {value}", flush=True)
+            time.sleep(2)
+        os.write(fd, make_update_packet(BLANK, BLANK, BLANK))
+    except OSError as exc:
+        print(f"Cannot write to {device_path}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        os.close(fd)
+    return 0
+
+
 def parse_args(argv):
     p = argparse.ArgumentParser(
         description="Show real CPU temperature on a Gamdias Chione E4 "
@@ -473,6 +496,11 @@ def parse_args(argv):
                    help="list all hidraw devices with USB IDs, then exit")
     p.add_argument("--list-hwmon", action="store_true",
                    help="list all hwmon temperature sensors, then exit")
+    p.add_argument("--test", action="store_true",
+                   help="show 88.8 then 12.3 for 2s each, blank and exit "
+                        "(no sensor needed)")
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
     if not math.isfinite(args.interval) or not (
             MIN_INTERVAL_SECONDS <= args.interval <= MAX_INTERVAL_SECONDS):
@@ -491,6 +519,14 @@ def main(argv=None):
     if args.list_hwmon:
         list_hwmon()
         return 0
+
+    if args.test:
+        device_path = args.device or find_hidraw_device(CHIONE_VID, CHIONE_PID)
+        if not device_path:
+            print(f"Chione display ({CHIONE_VID}:{CHIONE_PID}) not found.",
+                  file=sys.stderr)
+            return 1
+        return run_test(device_path)
 
     signal.signal(signal.SIGINT, _request_stop)
     signal.signal(signal.SIGTERM, _request_stop)

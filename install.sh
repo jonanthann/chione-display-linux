@@ -9,9 +9,11 @@
 #   ./install.sh udev               install the udev access rule (needs sudo)
 #   ./install.sh udev --group plugdev   ... granting a group instead of uaccess
 #   ./install.sh service            install + start the systemd user service
+#   ./install.sh service -- ARGS... ... also save ARGS (e.g. --hwmon NAME) to
+#                                   ~/.config/chione-temp.conf for the script
 #   ./install.sh all                udev, then service
 #   ./install.sh print-rule         show the rule that would be installed
-#   ./install.sh remove             undo both
+#   ./install.sh remove             undo both (keeps chione-temp.conf)
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +22,9 @@ RULE_SRC="$REPO_DIR/udev/70-chione.rules"
 RULE_DST="/etc/udev/rules.d/70-chione.rules"
 UNIT_NAME="chione-temp.service"
 UNIT_DST="$HOME/.config/systemd/user/$UNIT_NAME"
+# Optional script arguments for the service (CHIONE_ARGS), kept outside the
+# generated unit so re-running `service` never loses them.
+CONF_DST="$HOME/.config/chione-temp.conf"
 # $USER is not set in every environment (some containers, su -c, cron), and
 # `set -u` would abort on it.
 USER="${USER:-$(id -un)}"
@@ -247,6 +252,22 @@ cmd_udev() {
 }
 
 cmd_service() {
+    # Optional: `service -- ARGS...` saves ARGS for the script in $CONF_DST.
+    local args=() have_args=0 a
+    if [ $# -gt 0 ]; then
+        [ "$1" = "--" ] || die "unexpected '$1'. Usage: ./install.sh service [-- ARGS...]"
+        shift
+        have_args=1
+        for a in "$@"; do
+            # systemd splits $CHIONE_ARGS on whitespace and the conf value is
+            # double-quoted, so none of these can be represented safely.
+            case "$a" in
+                *[\"\'\\[:space:]]*|"")
+                    die "argument '$a' has quotes, backslash, whitespace or is empty; not supported in $CONF_DST" ;;
+            esac
+            args+=("$a")
+        done
+    fi
     # A user service belongs to the desktop user: under sudo the unit lands in
     # /root/.config and systemctl --user has no bus, so nothing gets installed.
     [ "$(id -u)" -ne 0 ] || die "run 'service' without sudo (it is a per-user service)"
@@ -279,8 +300,11 @@ Description=Gamdias Chione E4 temperature display (real CPU temp via hwmon)
 ConditionPathExists=$script_u
 
 [Service]
+# Optional script arguments (CHIONE_ARGS="--hwmon NAME"); the leading - makes
+# the file optional. Written by './install.sh service -- ARGS...'.
+EnvironmentFile=-%h/.config/chione-temp.conf
 # Quoted so a checkout path containing spaces stays a single argument.
-ExecStart="$py_u" "$script_x"
+ExecStart="$py_u" "$script_x" \$CHIONE_ARGS
 WorkingDirectory=$repo_u
 Restart=on-failure
 RestartSec=5
@@ -292,6 +316,13 @@ RestartPreventExitStatus=2
 WantedBy=default.target
 EOF
     ok "wrote $UNIT_DST"
+    if [ "$have_args" -eq 1 ]; then
+        mkdir -p "$(dirname "$CONF_DST")"
+        printf 'CHIONE_ARGS="%s"\n' "${args[*]:-}" > "$CONF_DST"
+        ok "wrote $CONF_DST (CHIONE_ARGS=\"${args[*]:-}\")"
+    elif [ -f "$CONF_DST" ]; then
+        ok "keeping existing $CONF_DST"
+    fi
     case "$REPO_DIR" in
         "$HOME"/*) ;;
         *) warn "the repo lives outside your home ($REPO_DIR)."
@@ -301,13 +332,42 @@ EOF
     esac
     # The script waits up to 60s for a CPU sensor and then exits with 2, so
     # "started" after a short sleep would be misleading: check beforehand.
-    if ! grep -q 'default$' <<<"$(python3 "$SCRIPT" --list-hwmon 2>/dev/null || true)"; then
+    # A --hwmon in the saved args replaces the default lookup: check that
+    # driver instead (first column of --list-hwmon).
+    local eff="" want="" prev="" hw_out
+    if [ "$have_args" -eq 1 ]; then
+        eff="${args[*]:-}"
+    elif [ -f "$CONF_DST" ]; then
+        eff="$(sed -n 's/^CHIONE_ARGS="\(.*\)"$/\1/p' "$CONF_DST" | tail -n 1)"
+    fi
+    # read -a splits like systemd does, without glob-expanding a stray "*".
+    local -a eff_words=()
+    read -r -a eff_words <<<"$eff"
+    for a in "${eff_words[@]}"; do
+        case "$a" in
+            --hwmon=*) want="${a#--hwmon=}" ;;
+            *) [ "$prev" = "--hwmon" ] && want="$a" ;;
+        esac
+        prev="$a"
+    done
+    hw_out="$(python3 "$SCRIPT" --list-hwmon 2>/dev/null || true)"
+    local missing=0
+    if [ -n "$want" ]; then
+        cut -f1 <<<"$hw_out" | grep -qxF -- "$want" || missing=1
+    else
+        grep -q 'default$' <<<"$hw_out" || missing=1
+    fi
+    if [ "$missing" -eq 1 ]; then
         warn "=================================================================="
-        warn "no default CPU sensor found (k10temp / coretemp / zenpower)."
+        if [ -n "$want" ]; then
+            warn "no hwmon sensor from driver '$want' (set with --hwmon) found."
+        else
+            warn "no default CPU sensor found (k10temp / coretemp / zenpower)."
+        fi
         warn "The service will wait ~60s for one and then exit with an error."
         warn "Intel: sudo modprobe coretemp   |   AMD: sudo modprobe k10temp"
-        warn "or pick a driver listed by '$SCRIPT --list-hwmon' with --hwmon"
-        warn "(add it to ExecStart in $UNIT_DST)."
+        warn "or pick a driver listed by '$SCRIPT --list-hwmon' with"
+        warn "'./install.sh service -- --hwmon NAME' (or edit $CONF_DST)."
         warn "=================================================================="
     fi
     systemctl --user daemon-reload
@@ -351,16 +411,18 @@ cmd_remove() {
     else
         warn "no rule at $RULE_DST"
     fi
+    [ -f "$CONF_DST" ] && ok "kept $CONF_DST (delete it by hand if unwanted)"
+    return 0
 }
 
 case "${1:-check}" in
     check)      cmd_check ;;
     udev)       shift; cmd_udev "$@" ;;
     print-rule) shift; cmd_print_rule "$@" ;;
-    service)    cmd_service ;;
+    service)    shift; cmd_service "$@" ;;
     all)        shift; cmd_udev "$@"; cmd_service ;;
     remove)     cmd_remove ;;
     -h|--help|help)
-        sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+        sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
     *) die "unknown command '${1}'. Try: check | udev | service | all | remove" ;;
 esac

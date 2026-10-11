@@ -1,4 +1,12 @@
-import contextlib, errno, glob as _glob, io, os, sys, tempfile, unittest
+import contextlib
+import errno
+import glob as _glob
+import io
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -165,7 +173,8 @@ class RunBase(Base):
             p.start(); self.addCleanup(p.stop)
 
     def packets(self):
-        data = open(self.dev, "rb").read()
+        with open(self.dev, "rb") as f:
+            data = f.read()
         self.assertEqual(len(data) % 64, 0)
         return [data[i:i + 64] for i in range(0, len(data), 64)]
 
@@ -233,8 +242,8 @@ class TestRun(RunBase):
         p = self.mk(1, "k10temp", "50000")
         sensor = {"path": p, "name": "k10temp"}
         def cb():
-            if self.clock.t >= 1001 and open(p).read() == "50000":
-                open(p, "w").write("lixo")
+            if self.clock.t >= 1001 and Path(p).read_text() == "50000":
+                Path(p).write_text("lixo")
             if self.clock.t >= 1003: m._stop = True
         self.on_sleep = cb
         m.run(self.dev, sensor, None, "temp1_input", 0.5, False)
@@ -274,7 +283,6 @@ class TestRun(RunBase):
     def test_write_failure_returns_lost(self):
         p = self.mk(1, "k10temp", "45000")
         sensor = {"path": p, "name": "k10temp"}
-        real = os.write
         def bad(fd, b): raise OSError(errno.EIO, "Input/output error")
         with mock.patch.object(m.os, "write", bad):
             self.assertEqual(m.run(self.dev, sensor, None, "temp1_input", 0.5, False), "lost")
@@ -291,7 +299,7 @@ class TestRun(RunBase):
         self.assertEqual(len(closed), 1)
 
     def test_main_reconnects_after_lost(self):
-        p = self.mk(1, "k10temp", "45000")
+        self.mk(1, "k10temp", "45000")
         results = ["lost", OSError(errno.EIO, "io"), "lost", "stop"]
         calls = []
         def fake_run(*a):
@@ -520,7 +528,6 @@ class TestWarnDedup(RunBase):
         p = self.mk(1, "k10temp", "45000")
         sensor = {"path": p, "name": "k10temp"}
         warned = set()
-        real_write = os.write
         def bad(fd, data): raise OSError(errno.EIO, "io")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

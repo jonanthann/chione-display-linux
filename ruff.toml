@@ -1,0 +1,2 @@
+# Keep in line with the oldest Python the CI matrix tests.
+target-version = "py39"
