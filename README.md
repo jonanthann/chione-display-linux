@@ -62,6 +62,10 @@ Clone the repository, then use `install.sh`:
 Replug the cooler after installing the udev rule. To pass options to the
 service, put them after `--`: `./install.sh service -- --mode auto --alarm 90`.
 
+To uninstall, `./install.sh remove` takes out the service, the udev rule and
+the GNOME launcher. `./install.sh gui --remove` removes only the launcher and
+icon.
+
 To run without the service:
 
 ```bash
