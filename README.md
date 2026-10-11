@@ -15,7 +15,19 @@ USB HID protocol:
 | [`windows/chione_temp_display_win.py`](windows/chione_temp_display_win.py) | Windows | LibreHardwareMonitor web server | `hidapi`, LibreHardwareMonitor |
 
 The update packet is byte-for-byte identical on both; only how the script
-reaches the device and where it gets the temperature from differ.
+reaches the device and where it gets the temperature from differ. The code
+they share (packet building, display state, self-test pattern, interval
+check) lives in [`chione_core.py`](chione_core.py) at the repository root,
+and both scripts need it: it must sit next to the Linux script, and next to
+the Windows script or in its parent folder.
+
+```
+chione_core.py                    shared code (both platforms)
+chione_temp_display.py            Linux script
+windows/chione_temp_display_win.py   Windows script
+install.sh  systemd/  udev/       Linux setup
+tests/                            unit tests
+```
 
 ## Why this exists
 
@@ -203,6 +215,10 @@ python3 chione_temp_display.py                    # auto-detects everything
 python3 chione_temp_display.py --hwmon coretemp   # pin a driver, if needed
 ```
 
+Run it from the cloned repository. If you copy the script elsewhere (manual
+install), copy `chione_core.py` into the same folder, otherwise it fails to
+start with an import error.
+
 The script finds both the cooler (by USB ID) and the CPU sensor (by driver
 name) automatically, with nothing to edit. Your CPU temperature should
 appear on the display within a couple of seconds, updating live, and also
@@ -337,7 +353,16 @@ and it has to stay running whenever the script runs.
 Check that it works by opening <http://localhost:8085/data.json> in a
 browser: you should see a wall of JSON.
 
-### 2. Run it
+### 2. Get the files
+
+Either clone the repository and run from it (the script finds
+`chione_core.py` in the parent folder), or download just
+`windows\chione_temp_display_win.py` and `chione_core.py` and put them in
+the same folder. The script looks for the core in its own folder and in the
+parent one. If it finds neither, it exits with code `1` asking you to copy
+`chione_core.py` next to it.
+
+### 3. Run it
 
 ```powershell
 python windows\chione_temp_display_win.py
@@ -348,7 +373,7 @@ The script finds the cooler by its USB ID and picks the CPU sensor on its
 own. If the auto-detection picks the wrong one, see what is available with
 `--list-sensors` and pass the one you want with `--sensor`.
 
-### 3. (Optional) Start it automatically at login
+### 4. (Optional) Start it automatically at login
 
 Press <kbd>Win</kbd>+<kbd>R</kbd>, enter `shell:startup`, and create a
 shortcut in the folder that opens, pointing at:
@@ -357,7 +382,9 @@ shortcut in the folder that opens, pointing at:
 pythonw C:\path\to\chione-display-linux\windows\chione_temp_display_win.py --wait -1
 ```
 
-`pythonw` runs it without a console window, and `--wait -1` makes it wait
+The shortcut keeps working as long as `chione_core.py` is next to the script
+or in its parent folder (the cloned repository layout, or both files copied
+into one folder). `pythonw` runs it without a console window, and `--wait -1` makes it wait
 for LibreHardwareMonitor instead of giving up when it happens to start first.
 
 `pythonw` has no console, so its output is lost. To keep a log, add
@@ -426,7 +453,7 @@ k10temp   temp3_input   42.2C   Tccd1
 | Linux | `2` | no CPU hwmon sensor found after waiting up to 60 s at startup (also argparse errors); the systemd unit's `RestartPreventExitStatus=2` uses it to stop restarting |
 | Windows | `0` | stopped normally, or `--test` / `--version` |
 | Windows | `2` | LibreHardwareMonitor unreachable after `--wait`, or no sensor found (also argparse errors, or a `--log-file` that cannot be opened) |
-| Windows | `1` | `--list-sensors` found no sensors or could not connect, or `--test` could not find, open or write to the display |
+| Windows | `1` | `--list-sensors` found no sensors or could not connect, `--test` could not find, open or write to the display, `chione_core.py` not found next to the script or in its parent folder, or `hidapi` not installed |
 
 A missing or inaccessible cooler does not exit: both scripts keep retrying.
 
@@ -435,6 +462,7 @@ A missing or inaccessible cooler does not exit: both scripts keep retrying.
 ### Linux
 
 - Python 3, standard library only (no external packages needed)
+- `chione_core.py` in the same folder as `chione_temp_display.py`
 - `hidraw` support (default on virtually every distribution)
 - A CPU with a working `hwmon` temperature sensor (`k10temp`, `coretemp` or
   `zenpower`; on Debian with an Intel CPU you may need `modprobe coretemp`)
@@ -443,6 +471,7 @@ A missing or inaccessible cooler does not exit: both scripts keep retrying.
 ### Windows
 
 - Python 3 and the [`hidapi`](https://pypi.org/project/hidapi/) package
+- `chione_core.py` next to the script or in its parent folder
 - LibreHardwareMonitor running with its web server enabled
 
 ## Other Chione models, and reporting one
@@ -470,7 +499,8 @@ rely on before ordering.
 
 ## Development
 
-Unit tests live in `tests/`. Run them from the repository root:
+Unit tests live in `tests/`: `test_core.py` covers the shared
+`chione_core.py`, the others cover each platform script. Run them from the repository root:
 
 ```bash
 python3 -m unittest discover -s tests

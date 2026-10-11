@@ -97,23 +97,44 @@ live one, and USB replug / suspend-resume are recovered automatically.
 
 import argparse
 import glob
-import math
 import os
 import select
 import signal
 import sys
 import time
 
-__version__ = "1.1.0"
+try:
+    from chione_core import (  # noqa: F401 (re-exported for tests and callers)
+        BLANK,
+        CHIONE_PID,
+        CHIONE_VID,
+        LOG_EVERY_SECONDS,
+        MAX_INTERVAL_SECONDS,
+        MIN_INTERVAL_SECONDS,
+        RECONNECT_DELAY_SECONDS,
+        STALE_AFTER_SECONDS,
+        UPDATE_INTERVAL_SECONDS,
+        DisplayState,
+        __version__,
+        blank_packet,
+        check_interval,
+        format_response,
+        make_update_packet,
+        run_test_pattern,
+        temp_to_digits,
+        warn_once,
+    )
+except ImportError:
+    sys.exit("chione_core.py not found. It must sit next to this script "
+             "(both are in the repository root).")
 
 # ---------------------------------------------------------------------------
 # DEFAULTS (all overridable via command-line flags; see --help)
 # ---------------------------------------------------------------------------
 
-# USB identity of the Chione display. Stable across reboots, unlike the
-# /dev/hidrawN number, so the node is discovered by this ID at startup.
-CHIONE_VID = "1B80"
-CHIONE_PID = "B53C"
+# The USB identity of the display (CHIONE_VID:CHIONE_PID, from chione_core) is
+# stable across reboots, unlike the /dev/hidrawN number, so the node is
+# discovered by this ID at startup.
 
 # hidraw device node. None -> auto-discover by CHIONE_VID:CHIONE_PID.
 # Override with --device /dev/hidrawN only for unusual setups.
@@ -137,37 +158,16 @@ HWMON_CANDIDATES = ("k10temp", "coretemp", "zenpower")
 # look wrong.
 HWMON_TEMP_FILE = "temp1_input"
 
-# How often to refresh the display, in seconds.
-UPDATE_INTERVAL_SECONDS = 0.5
-# Floor for --interval: the sensor updates about once a second, so anything
-# faster only floods the USB link with identical writes.
-MIN_INTERVAL_SECONDS = 0.1
-
-# How long to wait before retrying after the device disappears / isn't found.
-RECONNECT_DELAY_SECONDS = 3.0
-
-# If the CPU sensor cannot be read for this long, blank the display instead
-# of freezing the last good value on it (which would look live).
-STALE_AFTER_SECONDS = 5.0
-
 # Exit code for permanent misconfiguration (no matching hwmon sensor). A
 # missing device permission is retried instead, since at boot it is usually
 # transient (see main). The systemd unit uses RestartPreventExitStatus=2 to stop
 # retrying a hopeless start instead of looping forever.
 EXIT_CONFIG_ERROR = 2
 
-# Outside --debug, log the shown value at most this often (seconds).
-LOG_EVERY_SECONDS = 60.0
-
-# Upper bound for --interval (also keeps sleeps finite).
-MAX_INTERVAL_SECONDS = 60.0
 # How long to wait at startup for the sensor to appear (e.g. coretemp loaded
 # late) before giving up, and how often to check meanwhile.
 SENSOR_WAIT_SECONDS = 60.0
 SENSOR_POLL_SECONDS = 2.0
-
-# Any non-digit byte blanks a display position (renders as a dash).
-BLANK = 0x20
 
 # ---------------------------------------------------------------------------
 
@@ -197,7 +197,6 @@ def find_hidraw_device(vid, pid):
     (the HID_ID line, e.g. HID_ID=0003:00001B80:0000B53C) instead of trusting
     an unstable device-node number.
     """
-    vid, pid = int(vid, 16), int(pid, 16)
     for uevent in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
         try:
             with open(uevent) as f:
@@ -303,30 +302,6 @@ def read_temp_celsius(path):
     return milli_c / 1000.0
 
 
-def temp_to_digits(temp_c):
-    """Clamp to the display's two-digit-plus-decimal range and split into
-    (tens, units, tenths)."""
-    t = max(0.0, min(99.9, round(temp_c, 1)))
-    whole = int(t)
-    tenths = round((t - whole) * 10)
-    if tenths == 10:
-        whole += 1
-        tenths = 0
-    return whole // 10, whole % 10, tenths
-
-
-def make_update_packet(tens, units, tenths):
-    pkt = bytearray(64)
-    pkt[0:4] = bytes([0x3A, 0xB5, 0x01, 0x20])
-    pkt[4] = tens
-    pkt[5] = units
-    pkt[6] = tenths
-    pkt[7] = 0x01
-    pkt[8:12] = bytes([0x01, 0x01, 0x00, 0x00])
-    pkt[12:16] = bytes([0x13, 0x00, 0x00, 0x00])
-    return bytes(pkt)
-
-
 def _read_response(fd):
     """Non-blocking read of the device's reply, or None if none is ready.
 
@@ -359,95 +334,63 @@ def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None):
     except BaseException:
         os.close(fd)
         raise
-    msg = f"Writing to device: {device_path}"
-    if msg not in warned:
-        print(msg, flush=True)
-        warned.add(msg)
+    warn_once(warned, f"Writing to device: {device_path}")
 
-    last_digits = None
-    logged_digits = None
-    last_log = None
-    last_stale = None
-    last_temp = None
-    last_good = time.monotonic()
+    state = DisplayState(interval, time.monotonic())
     prev_resp = None
-    last_resolve = 0.0
     try:
         while not _stop:
             try:
-                last_temp = read_temp_celsius(sensor["path"])
-                last_good = time.monotonic()
+                state.reading(read_temp_celsius(sensor["path"]),
+                              time.monotonic())
             except (OSError, ValueError):
                 # Transient sensor hiccup: reuse the last good reading rather
                 # than crashing. With none yet, show nothing until stale.
                 pass
 
-            stale = (time.monotonic() - last_good
-                     > max(STALE_AFTER_SECONDS, 2 * interval))
-            if stale:
-                # The sensor has been gone for a while (driver unloaded,
-                # hwmon renumbered): blank rather than show a frozen value.
-                digits = (BLANK, BLANK, BLANK)
-                # hwmon may have been renumbered (driver reloaded): look for
-                # the sensor again, at most once per reconnect delay.
-                if time.monotonic() - last_resolve >= RECONNECT_DELAY_SECONDS:
-                    last_resolve = time.monotonic()
-                    new_path, new_name = resolve_hwmon_temp_path(hwmon, temp_file)
-                    if new_path and new_path != sensor["path"]:
-                        sensor["path"], sensor["name"] = new_path, new_name
-                        print(f"Sensor changed, now reading: {new_path} "
-                              f"({new_name})", flush=True)
-            elif last_temp is None:
+            stale = state.is_stale(time.monotonic())
+            if state.idle(stale):
                 # Never read yet and not stale: leave the display untouched.
                 _sleep_interruptible(interval)
                 continue
-            else:
-                digits = temp_to_digits(last_temp)
+            digits = state.digits(stale)
+            # If the sensor has been gone for a while (driver unloaded, hwmon
+            # renumbered) the display is blanked rather than frozen, and the
+            # sensor is looked for again, at most once per reconnect delay.
+            if stale and state.resolve_due(time.monotonic()):
+                new_path, new_name = resolve_hwmon_temp_path(hwmon, temp_file)
+                if new_path and new_path != sensor["path"]:
+                    sensor["path"], sensor["name"] = new_path, new_name
+                    print(f"Sensor changed, now reading: {new_path} "
+                          f"({new_name})", flush=True)
             try:
                 os.write(fd, make_update_packet(*digits))
                 resp = _read_response(fd)
             except OSError as exc:
-                msg = f"Device I/O failed ({exc}); will reconnect."
-                if msg not in warned:
-                    print(msg, flush=True)
-                    warned.add(msg)
+                warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
                 return "lost"
             # A successful write re-arms warnings (the "Writing to device"
             # line is kept in the set so reconnects do not repeat it).
             warned.intersection_update({f"Writing to device: {device_path}"})
 
             if debug and resp is not None:
-                print(f"  resp: {resp.hex(' ')}", flush=True)
-                if prev_resp is not None and len(prev_resp) == len(resp):
-                    changed = [i for i in range(len(resp)) if resp[i] != prev_resp[i]]
-                    if changed:
-                        print(f"  changed offsets vs prev: {changed}", flush=True)
+                for line in format_response(resp, prev_resp):
+                    print(line, flush=True)
                 prev_resp = resp
 
-            # Outside --debug, log at most every LOG_EVERY_SECONDS, but at
-            # once on first reading and on stale transitions. Flush so
-            # `systemctl status` isn't block-buffered.
-            now = time.monotonic()
-            important = last_stale is None or stale != last_stale
-            due = last_log is None or now - last_log >= LOG_EVERY_SECONDS
-            if (debug and digits != last_digits) or important or (
-                    due and not debug and digits != logged_digits):
+            # Flush so `systemctl status` isn't block-buffered.
+            if state.log_due(digits, stale, time.monotonic(), debug):
                 if stale:
                     print(f"Cannot read {sensor['path']}; display blanked.",
                           file=sys.stderr, flush=True)
                 else:
-                    print(f"CPU: {last_temp:.1f}C -> display: "
-                          f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
-                last_log = now
-                logged_digits = digits
-            last_digits = digits
-            last_stale = stale
+                    print(state.shown_text(digits), flush=True)
 
             _sleep_interruptible(interval)
     finally:
         # Blank the display so a frozen value isn't mistaken for a live one.
         try:
-            os.write(fd, make_update_packet(BLANK, BLANK, BLANK))
+            os.write(fd, blank_packet())
         except OSError:
             pass
         os.close(fd)
@@ -463,11 +406,7 @@ def run_test(device_path):
         print(f"Cannot open {device_path}: {exc}", file=sys.stderr)
         return 1
     try:
-        for value in (88.8, 12.3):
-            os.write(fd, make_update_packet(*temp_to_digits(value)))
-            print(f"Showing {value}", flush=True)
-            time.sleep(2)
-        os.write(fd, make_update_packet(BLANK, BLANK, BLANK))
+        run_test_pattern(lambda pkt: os.write(fd, pkt))
     except OSError as exc:
         print(f"Cannot write to {device_path}: {exc}", file=sys.stderr)
         return 1
@@ -482,7 +421,7 @@ def parse_args(argv):
                     "cooler's display, over raw USB HID (no ZEUS CAST/Wine).")
     p.add_argument("--device", default=HIDRAW_DEVICE,
                    help=f"hidraw node (default: auto-discover by USB ID "
-                        f"{CHIONE_VID}:{CHIONE_PID})")
+                        f"{CHIONE_VID:04X}:{CHIONE_PID:04X})")
     p.add_argument("--hwmon", default=HWMON_DRIVER_NAME,
                    help="hwmon driver name to pin (default: auto-detect, "
                         "trying " + ", ".join(HWMON_CANDIDATES) + ")")
@@ -502,10 +441,7 @@ def parse_args(argv):
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
-    if not math.isfinite(args.interval) or not (
-            MIN_INTERVAL_SECONDS <= args.interval <= MAX_INTERVAL_SECONDS):
-        p.error(f"--interval must be between {MIN_INTERVAL_SECONDS} and "
-                f"{MAX_INTERVAL_SECONDS:.0f}")
+    check_interval(p, args.interval)
     return args
 
 
@@ -523,7 +459,7 @@ def main(argv=None):
     if args.test:
         device_path = args.device or find_hidraw_device(CHIONE_VID, CHIONE_PID)
         if not device_path:
-            print(f"Chione display ({CHIONE_VID}:{CHIONE_PID}) not found.",
+            print(f"Chione display ({CHIONE_VID:04X}:{CHIONE_PID:04X}) not found.",
                   file=sys.stderr)
             return 1
         return run_test(device_path)
@@ -569,7 +505,7 @@ def main(argv=None):
             # Print once per absence so an unplugged cooler does not flood
             # the journal; reset when the device shows up again.
             if not absent_warned:
-                print(f"Chione display ({CHIONE_VID}:{CHIONE_PID}) not found - "
+                print(f"Chione display ({CHIONE_VID:04X}:{CHIONE_PID:04X}) not found - "
                       "is it plugged in? Retrying...", flush=True)
                 absent_warned = True
             _sleep_interruptible(RECONNECT_DELAY_SECONDS)
@@ -604,10 +540,7 @@ def main(argv=None):
         except OSError as exc:
             # Node vanished or is not ready (ENODEV, ENXIO, EIO, EBUSY on
             # replug/resume); rediscover and retry.
-            msg = f"Cannot open device ({exc}); will retry."
-            if msg not in warned:
-                print(msg, flush=True)
-                warned.add(msg)
+            warn_once(warned, f"Cannot open device ({exc}); will retry.")
             result = "lost"
 
         if result == "stop":

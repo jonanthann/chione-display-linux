@@ -59,14 +59,44 @@ reading is not mistaken for a live one.
 import argparse
 import http.client
 import json
-import math
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
-__version__ = "1.1.0"
+# chione_core.py lives in the parent folder in the repo, or next to this
+# script if it was copied alongside.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _path in (os.path.dirname(_HERE), _HERE):
+    if _path not in sys.path:
+        # append, not insert: never shadow a stdlib module.
+        sys.path.append(_path)
+
+try:
+    from chione_core import (  # noqa: F401 (re-exported for tests and callers)
+        BLANK,
+        CHIONE_PID,
+        CHIONE_VID,
+        LOG_EVERY_SECONDS,
+        MAX_INTERVAL_SECONDS,
+        MIN_INTERVAL_SECONDS,
+        RECONNECT_DELAY_SECONDS,
+        STALE_AFTER_SECONDS,
+        UPDATE_INTERVAL_SECONDS,
+        DisplayState,
+        __version__,
+        blank_packet,
+        check_interval,
+        format_response,
+        make_update_packet,
+        run_test_pattern,
+        temp_to_digits,
+        warn_once,
+    )
+except ImportError:
+    sys.exit("chione_core.py not found. Copy it next to this script (it is in "
+             "the repository root, one folder up).")
 
 try:
     import hid
@@ -78,9 +108,6 @@ except ImportError:
 # DEFAULTS (all overridable via command-line flags; see --help)
 # ---------------------------------------------------------------------------
 
-CHIONE_VID = 0x1B80
-CHIONE_PID = 0xB53C
-
 # LibreHardwareMonitor's web server (Options -> Remote Web Server -> Run).
 LHM_URL = "http://localhost:8085/data.json"
 
@@ -90,58 +117,11 @@ LHM_URL = "http://localhost:8085/data.json"
 SENSOR_PREFERENCE = ["Tctl/Tdie", "CPU Package", "Core (Tctl", "CPU Total",
                      "Package", "CPU"]
 
-UPDATE_INTERVAL_SECONDS = 0.5
-# Floor for --interval: the sensor updates about once a second, so anything
-# faster only floods the USB link with identical writes.
-MIN_INTERVAL_SECONDS = 0.1
-RECONNECT_DELAY_SECONDS = 3.0
-
-# If the sensor cannot be read for this long, blank the display instead of
-# freezing the last good value on it (which would look live).
-STALE_AFTER_SECONDS = 5.0
-
-# Any non-digit byte blanks a display position (renders as a dash).
-BLANK = 0x20
-
-# Outside --debug, log the shown value at most this often (seconds).
-LOG_EVERY_SECONDS = 60.0
-
-# Upper bound for --interval (also keeps sleeps finite).
-MAX_INTERVAL_SECONDS = 60.0
-
 # --log-file is rotated to PATH.1 when it is larger than this on startup.
 MAX_LOG_BYTES = 1024 * 1024
 
 # Message kept across successful writes so reconnects do not repeat it.
 WRITING_MSG = "Writing to device: Chione E4 display"
-
-
-# ---------------------------------------------------------------------------
-# Protocol (identical to the Linux version)
-# ---------------------------------------------------------------------------
-
-def temp_to_digits(temp_c):
-    """Clamp to the display's two-digit-plus-decimal range and split into
-    (tens, units, tenths)."""
-    t = max(0.0, min(99.9, round(temp_c, 1)))
-    whole = int(t)
-    tenths = round((t - whole) * 10)
-    if tenths == 10:
-        whole += 1
-        tenths = 0
-    return whole // 10, whole % 10, tenths
-
-
-def make_update_packet(tens, units, tenths):
-    pkt = bytearray(64)
-    pkt[0:4] = bytes([0x3A, 0xB5, 0x01, 0x20])
-    pkt[4] = tens
-    pkt[5] = units
-    pkt[6] = tenths
-    pkt[7] = 0x01
-    pkt[8:12] = bytes([0x01, 0x01, 0x00, 0x00])
-    pkt[12:16] = bytes([0x13, 0x00, 0x00, 0x00])
-    return bytes(pkt)
 
 
 def write_report(device, packet):
@@ -268,13 +248,6 @@ def list_sensors(url):
 
 # ---------------------------------------------------------------------------
 
-def _warn_once(warned, msg, file=None):
-    """Print msg unless it was already reported since the last success."""
-    if msg not in warned:
-        print(msg, file=file, flush=True)
-        warned.add(msg)
-
-
 def open_display(warned=None):
     """Open the Chione display, or return None if it isn't present."""
     if not hid.enumerate(CHIONE_VID, CHIONE_PID):
@@ -289,7 +262,7 @@ def open_display(warned=None):
         if warned is None:
             print(msg, file=sys.stderr, flush=True)
         else:
-            _warn_once(warned, msg, sys.stderr)
+            warn_once(warned, msg, sys.stderr)
         return None
     device.set_nonblocking(True)
     return device
@@ -304,63 +277,50 @@ def run(device, url, sensor, wanted, interval, debug, warned=None):
     """
     if warned is None:
         warned = set()
-    last_digits = None
-    logged_digits = None
-    last_log = None
-    last_stale = None
-    last_temp = None
-    last_good = time.monotonic()
+    state = DisplayState(interval, time.monotonic())
     prev_resp = None
-    last_resolve = 0.0
 
     while True:
         try:
-            temp = read_sensor(url, sensor["path"], sensor["name"])
-            if temp is not None:
-                last_temp = temp
-                last_good = time.monotonic()
+            state.reading(read_sensor(url, sensor["path"], sensor["name"]),
+                          time.monotonic())
         except (urllib.error.URLError, OSError, ValueError,
                 http.client.HTTPException):
             # LibreHardwareMonitor restarted or is briefly unreachable:
             # keep showing the last good value rather than dying.
             pass
 
-        stale = (time.monotonic() - last_good
-                 > max(STALE_AFTER_SECONDS, 2 * interval))
-        if last_temp is None and not stale:
+        stale = state.is_stale(time.monotonic())
+        if state.idle(stale):
             time.sleep(interval)
             continue
 
-        if stale:
-            # LibreHardwareMonitor has been gone for a while (or the sensor
-            # vanished): blank rather than show a frozen value as live.
-            digits = (BLANK, BLANK, BLANK)
-            # After an LHM restart the sensor may be renamed or reordered, so
-            # try to find it again (at most once per reconnect delay).
-            if time.monotonic() - last_resolve >= RECONNECT_DELAY_SECONDS:
-                last_resolve = time.monotonic()
-                try:
-                    sensors = list(walk_temperature_sensors(fetch_lhm_tree(url)))
-                    found = pick_cpu_sensor(sensors, wanted)
-                    # Without --sensor, a CPU sensor must not be replaced by
-                    # the non-CPU fallback (it would stick to it).
-                    if (found and not wanted and _is_cpu_path(sensor["path"])
-                            and not _is_cpu_path(found[0])):
-                        found = None
-                except (urllib.error.URLError, OSError, ValueError,
-                        http.client.HTTPException):
+        digits = state.digits(stale)
+        # If LibreHardwareMonitor has been gone for a while (or the sensor
+        # vanished) the display is blanked, not frozen. After an LHM restart
+        # the sensor may be renamed or reordered, so look for it again (at
+        # most once per reconnect delay).
+        if stale and state.resolve_due(time.monotonic()):
+            try:
+                sensors = list(walk_temperature_sensors(fetch_lhm_tree(url)))
+                found = pick_cpu_sensor(sensors, wanted)
+                # Without --sensor, a CPU sensor must not be replaced by
+                # the non-CPU fallback (it would stick to it).
+                if (found and not wanted and _is_cpu_path(sensor["path"])
+                        and not _is_cpu_path(found[0])):
                     found = None
-                if found and found != (sensor["path"], sensor["name"]):
-                    sensor["path"], sensor["name"] = found
-                    print(f"Sensor changed, now reading: {sensor['name']} "
-                          f"[{' / '.join(sensor['path'][:-1])}]", flush=True)
-        else:
-            digits = temp_to_digits(last_temp)
+            except (urllib.error.URLError, OSError, ValueError,
+                    http.client.HTTPException):
+                found = None
+            if found and found != (sensor["path"], sensor["name"]):
+                sensor["path"], sensor["name"] = found
+                print(f"Sensor changed, now reading: {sensor['name']} "
+                      f"[{' / '.join(sensor['path'][:-1])}]", flush=True)
         try:
             write_report(device, make_update_packet(*digits))
             resp = device.read(64)
         except (OSError, ValueError) as exc:
-            _warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
+            warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
             return "lost"
         # A successful write re-arms warnings (WRITING_MSG is kept so
         # reconnects do not repeat it).
@@ -368,30 +328,16 @@ def run(device, url, sensor, wanted, interval, debug, warned=None):
 
         if debug and resp:
             resp = bytes(resp)
-            print(f"  resp: {resp.hex(' ')}", flush=True)
-            if prev_resp is not None and len(prev_resp) == len(resp):
-                changed = [i for i in range(len(resp)) if resp[i] != prev_resp[i]]
-                if changed:
-                    print(f"  changed offsets vs prev: {changed}", flush=True)
+            for line in format_response(resp, prev_resp):
+                print(line, flush=True)
             prev_resp = resp
 
-        # Outside --debug, log at most every LOG_EVERY_SECONDS, but at once
-        # on first reading and on stale transitions.
-        now = time.monotonic()
-        important = last_stale is None or stale != last_stale
-        due = last_log is None or now - last_log >= LOG_EVERY_SECONDS
-        if (debug and digits != last_digits) or important or (
-                due and not debug and digits != logged_digits):
+        if state.log_due(digits, stale, time.monotonic(), debug):
             if stale:
                 print(f"Cannot read '{sensor['name']}' from {url}; display "
                       "blanked.", file=sys.stderr, flush=True)
             else:
-                print(f"CPU: {last_temp:.1f}C -> display: "
-                      f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
-            last_log = now
-            logged_digits = digits
-        last_digits = digits
-        last_stale = stale
+                print(state.shown_text(digits), flush=True)
 
         time.sleep(interval)
 
@@ -404,11 +350,7 @@ def run_test():
               file=sys.stderr)
         return 1
     try:
-        for value in (88.8, 12.3):
-            write_report(device, make_update_packet(*temp_to_digits(value)))
-            print(f"Showing {value}", flush=True)
-            time.sleep(2)
-        write_report(device, make_update_packet(BLANK, BLANK, BLANK))
+        run_test_pattern(lambda pkt: write_report(device, pkt))
     except OSError as exc:
         print(f"Cannot write to the display: {exc}", file=sys.stderr)
         return 1
@@ -464,10 +406,7 @@ def parse_args(argv):
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
-    if not math.isfinite(args.interval) or not (
-            MIN_INTERVAL_SECONDS <= args.interval <= MAX_INTERVAL_SECONDS):
-        p.error(f"--interval must be between {MIN_INTERVAL_SECONDS} and "
-                f"{MAX_INTERVAL_SECONDS:.0f}")
+    check_interval(p, args.interval)
     if args.wait < 0 and args.wait != -1:
         p.error("--wait must be -1 (forever) or >= 0")
     return args
@@ -554,13 +493,13 @@ def main(argv=None):
             if device is None:
                 device = open_display(warned)
                 if device is None:
-                    _warn_once(warned,
+                    warn_once(warned,
                                f"Chione display ({CHIONE_VID:04X}:"
                                f"{CHIONE_PID:04X}) not found - is it plugged "
                                "in? Retrying...")
                     time.sleep(RECONNECT_DELAY_SECONDS)
                     continue
-                _warn_once(warned, WRITING_MSG)
+                warn_once(warned, WRITING_MSG)
 
             run(device, args.url, sensor, args.sensor,
                 args.interval, args.debug, warned)
@@ -578,7 +517,7 @@ def main(argv=None):
         if device is not None:
             # Blank the display so a frozen value isn't mistaken for a live one.
             try:
-                write_report(device, make_update_packet(BLANK, BLANK, BLANK))
+                write_report(device, blank_packet())
             except OSError:
                 pass
             try:
