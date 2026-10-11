@@ -157,7 +157,8 @@ class TestServer(unittest.TestCase):
     def test_launcher_file(self):
         path = w.write_launcher("http://127.0.0.1:1/?t=abc")
         self.addCleanup(w.remove_quiet, path)
-        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        if os.name != "nt":  # Windows has no POSIX file modes
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
         with open(path) as f:
             self.assertIn("location.replace", f.read())
 
