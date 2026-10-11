@@ -43,7 +43,8 @@ keep the display alive and updated:
     byte 7     : decimal point 1 on (temperature), 0 off (fan)
     byte 8     : unit          1 = Celsius, 0 = Fahrenheit (0 in fan mode)
     byte 9     : CPU icon      1 in CPU mode, 0 in fan mode
-    byte 10    : mode          0 = CPU temperature, 1 = FAN rpm
+    byte 10    : mode          0 = CPU temperature, 1 = FAN rpm (lights the
+                               yellow fan icon next to "FAN RPM")
     byte 11    : flashing      1 makes the display blink (the temperature
                                 alarm; only used in CPU mode)
     byte 12    : checksum      sum(bytes 0..11) & 0xff

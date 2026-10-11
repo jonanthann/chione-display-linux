@@ -135,6 +135,10 @@ mode (CPU or FAN) and a flash flag used for the temperature alarm. Byte 12
 is a checksum, the sum of bytes 0 to 11 modulo 256, so the script now
 calculates it for every packet instead of sending a fixed value.
 
+On the hardware, FAN mode lights a small yellow fan icon to the left of
+the "FAN RPM" label and shows the RPM as four digits with no decimal
+point; the CPU icon and the unit go dark.
+
 ## Setup (Linux)
 
 Nothing here is distribution-specific: the same steps work on Debian,
