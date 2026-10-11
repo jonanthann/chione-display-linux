@@ -3,6 +3,7 @@ import io
 import os
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_chione as tc
@@ -31,10 +32,12 @@ class TestValidate(unittest.TestCase):
                 c.validate_settings(bad)
 
     def test_path(self):
-        self.assertEqual(c.settings_path({"XDG_CONFIG_HOME": "/x"}, "posix"),
-                         "/x/chione-display/settings.json")
-        self.assertTrue(c.settings_path({}, "posix").endswith(
-            ".config/chione-display/settings.json"))
+        # os.path.join uses the host separator, so compare path parts.
+        self.assertEqual(
+            Path(c.settings_path({"XDG_CONFIG_HOME": "/x"}, "posix")).parts[-3:],
+            ("x", "chione-display", "settings.json"))
+        self.assertEqual(Path(c.settings_path({}, "posix")).parts[-3:],
+                         (".config", "chione-display", "settings.json"))
         self.assertIn("chione-display", c.settings_path({"APPDATA": "A"}, "nt"))
 
 
