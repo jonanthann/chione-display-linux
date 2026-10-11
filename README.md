@@ -24,8 +24,10 @@ the Windows script or in its parent folder.
 ```
 chione_core.py                    shared code (both platforms)
 chione_temp_display.py            Linux script
+chione_gui.py                     GNOME app (Linux, optional)
 windows/chione_temp_display_win.py   Windows script
 install.sh  systemd/  udev/       Linux setup
+data/                             app icon
 tests/                            unit tests
 ```
 
@@ -156,8 +158,14 @@ your machine and tell you what's missing:
 ./install.sh print-rule  # show the udev rule it would install
 ./install.sh all         # install the udev rule + the systemd user service
 ./install.sh service -- --hwmon coretemp   # service only, saving script options
-./install.sh remove      # undo both (keeps ~/.config/chione-temp.conf)
+./install.sh gui         # GNOME app launcher + icon (no sudo)
+./install.sh gui --remove   # remove the launcher and icon
+./install.sh remove      # undo everything (keeps ~/.config/chione-temp.conf)
 ```
+
+Subcommands: `check` (the default), `udev`, `service`, `gui`, `all` (udev, then
+service; it does not install the app), `print-rule` and `remove` (which also
+removes the app launcher and icon).
 
 Every line `check` prints is a verdict on one piece of the setup, so a
 machine where everything already works looks like this:
@@ -320,6 +328,90 @@ sudo groupadd -f plugdev && sudo usermod -aG plugdev "$USER"
 
 Log out and back in so the new group membership takes effect.
 
+### 4. (Optional) Change the options while it runs: settings.json
+
+On Linux the service watches a settings file and applies changes without a
+restart, within 1 s. The default path is
+`~/.config/chione-display/settings.json` (or
+`$XDG_CONFIG_HOME/chione-display/settings.json` when that variable is set).
+It is a JSON object, and every key is optional:
+
+```json
+{
+  "mode": "auto",
+  "cycle": 5,
+  "fahrenheit": false,
+  "alarm": 90,
+  "fan_hwmon": "it8688",
+  "fan_input": "fan2_input"
+}
+```
+
+| Key | Type | Same as |
+|-----|------|---------|
+| `mode` | `"cpu"`, `"fan"` or `"auto"` | `--mode` |
+| `cycle` | number, 1 to 60 | `--cycle` |
+| `fahrenheit` | `true` or `false` | `--fahrenheit` |
+| `alarm` | number (Celsius) or `null` for off | `--alarm` |
+| `fan_hwmon` | string or `null` for auto | `--fan-hwmon` |
+| `fan_input` | string or `null` for auto | `--fan-input` |
+
+Precedence: a key present in the file wins over the command line and over
+`CHIONE_ARGS`; a key that is missing falls back to them. So `"alarm": null`
+turns the alarm off even if `CHIONE_ARGS` has `--alarm 90`. Other options
+(`--interval`, `--hwmon`, `--device` and so on) are not read from the file and
+still need a restart.
+
+If the file is missing the service just uses its options, and if it is deleted
+later it keeps the last good settings. If the file has invalid JSON or a bad
+value, the service logs `Ignoring settings file: ...` once, keeps the last good
+settings, and picks the file up again when you fix it. A change is logged as
+`Settings changed: ...`.
+
+Use `--settings PATH` to read another file, or `--no-settings` to ignore the
+file entirely. The settings file is not supported on Windows yet.
+
+## Desktop app (GNOME)
+
+[`chione_gui.py`](chione_gui.py) is a small GTK4/libadwaita window ("Chione
+Display") that edits `settings.json` for you, so you don't have to touch the
+terminal. It needs the GNOME bindings (the window text is in Portuguese):
+
+```bash
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1   # Debian/Ubuntu
+./install.sh gui            # menu launcher + icon, no sudo
+./install.sh gui --remove   # take them out again
+```
+
+`gui` writes `io.github.jonanthann.ChioneDisplay.desktop` and the icon under
+`~/.local/share` (or `$XDG_DATA_HOME`), so "Chione Display" shows up in the
+application menu. It warns if `python3-gi` is missing. You can also start it
+directly with `python3 chione_gui.py`.
+
+What the controls do:
+
+| Group | Control | Effect |
+|-------|---------|--------|
+| Leitura ao vivo | CPU and FAN readings | current CPU temperature and fan RPM, refreshed every second |
+| Exibição | Modo | CPU, Fan or Alternar (`mode`) |
+| Exibição | Trocar a cada (s) | seconds per mode; enabled only in Alternar (`cycle`) |
+| Exibição | Unidade | °C or °F (`fahrenheit`) |
+| Alarme | Piscar acima de, Limite (°C) | switch plus threshold, 30 to 120 (`alarm`); off saves `null` |
+| Fan | Fonte do fan | Automático or one of the detected `fan*_input` files, with live RPM (`fan_hwmon`, `fan_input`) |
+| Serviço | Serviço ativo | starts or stops `chione-temp` (`systemctl --user`) |
+| Serviço | Testar display | stops the service, runs the `--test` pattern, then restarts the service if it was running |
+| Serviço | Ver log | last 30 lines of `journalctl --user -u chione-temp` |
+
+Relation to the service: the app does not talk to the cooler. It only writes
+`settings.json`, and the running `chione-temp` service applies it within 1 s
+(the "Aplicado" toast confirms the save; the alarm and cycle fields are saved
+300 ms after the last edit). A banner appears when the service is not
+installed (`./install.sh service`). On opening, the app shows the options from
+`CHIONE_ARGS` (`--mode`, `--cycle`, `--fahrenheit`, `--alarm`, `--fan-hwmon`,
+`--fan-input`) with `settings.json` on top. It only saves the options you
+change in the app, so anything you never touched keeps following
+`CHIONE_ARGS`. Linux only.
+
 ## Notes for Debian and Ubuntu
 
 The driver itself needs no changes. Only two things differ from a Fedora-
@@ -438,6 +530,8 @@ script needs editing.
 | `--fan-hwmon DRIVER` | auto | hwmon driver for the fan RPM; auto takes the first CPU-labelled fan of a motherboard driver, ignoring GPUs |
 | `--fan-input FILE` | auto | which `fan*_input` file to read, e.g. `fan2_input` |
 | `--debug` | off | hexdump the device's reply |
+| `--settings PATH` | `~/.config/chione-display/settings.json` | live settings file; its values override these options (see [settings.json](#4-optional-change-the-options-while-it-runs-settingsjson)) |
+| `--no-settings` | off | ignore the settings file |
 | `--list-hidraw` | off | list all HID devices with their USB IDs, then exit |
 | `--list-hwmon` | off | list every hwmon temperature and fan sensor with live values, then exit |
 | `--test` | off | show `88.8`, then `12.3` (2 s each), blank and exit; no sensor needed |
@@ -497,6 +591,8 @@ A missing or inaccessible cooler does not exit: both scripts keep retrying.
 - A CPU with a working `hwmon` temperature sensor (`k10temp`, `coretemp` or
   `zenpower`; on Debian with an Intel CPU you may need `modprobe coretemp`)
 - systemd, only for the optional background service
+- For the optional desktop app: GNOME with GTK4/libadwaita and PyGObject
+  (`python3-gi gir1.2-gtk-4.0 gir1.2-adw-1` on Debian)
 
 ### Windows
 
@@ -530,7 +626,10 @@ rely on before ordering.
 ## Development
 
 Unit tests live in `tests/`: `test_core.py` covers the shared
-`chione_core.py`, the others cover each platform script. Run them from the repository root:
+`chione_core.py`, `test_settings.py` its settings file handling (validation,
+atomic save, live reload), `test_gui.py` the logic of `chione_gui.py` (it runs
+without GTK), and the others cover each platform script. Run them from the
+repository root:
 
 ```bash
 python3 -m unittest discover -s tests

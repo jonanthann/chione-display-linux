@@ -11,7 +11,9 @@ Standard library only. See the docstring of chione_temp_display.py for the
 reverse-engineered packet layout.
 """
 
+import json
 import math
+import os
 import time
 
 __version__ = "1.1.0"
@@ -324,3 +326,162 @@ class DisplayState:
         unit = "F" if self.fahrenheit else ""
         return (f"CPU: {self.last_temp:.1f}C -> display: "
                 f"{text[:-1]}.{text[-1]}{unit}")
+
+
+# Live settings file, written by a GUI and watched by the service.
+SETTINGS_MODES = ("cpu", "fan", "auto")
+SETTINGS_POLL_SECONDS = 1.0
+
+
+def settings_path(environ=None, platform=None):
+    """Default settings.json: $XDG_CONFIG_HOME/chione-display (~/.config
+    when unset), or %APPDATA%\\chione-display on Windows."""
+    environ = os.environ if environ is None else environ
+    platform = platform or os.name
+    if platform == "nt":
+        base = environ.get("APPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Roaming")
+    else:
+        base = environ.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config")
+    return os.path.join(base, "chione-display", "settings.json")
+
+
+class _SettingsParser:
+    """Adapter so check_cycle/check_alarm can raise ValueError."""
+
+    @staticmethod
+    def error(msg):
+        raise ValueError(msg.replace("--", "", 1))
+
+
+def _is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def validate_settings(data):
+    """Normalized copy of a settings dict (only known keys that are present).
+
+    Raises ValueError with a clear message on a wrong type or value.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("settings must be a JSON object")  # noqa: TRY004
+    out = {}
+    if "mode" in data:
+        if data["mode"] not in SETTINGS_MODES:
+            raise ValueError("mode must be one of: "
+                             + ", ".join(SETTINGS_MODES))
+        out["mode"] = data["mode"]
+    if "cycle" in data:
+        if not _is_number(data["cycle"]):
+            raise ValueError("cycle must be a number")
+        check_cycle(_SettingsParser, float(data["cycle"]))
+        out["cycle"] = float(data["cycle"])
+    if "fahrenheit" in data:
+        if not isinstance(data["fahrenheit"], bool):
+            raise ValueError("fahrenheit must be true or false")
+        out["fahrenheit"] = data["fahrenheit"]
+    if "alarm" in data:
+        alarm = data["alarm"]
+        if alarm is not None:
+            if not _is_number(alarm):
+                raise ValueError("alarm must be a number or null")
+            check_alarm(_SettingsParser, float(alarm))
+            alarm = float(alarm)
+        out["alarm"] = alarm
+    for key in ("fan_hwmon", "fan_input"):
+        if key in data:
+            if data[key] is not None and not isinstance(data[key], str):
+                raise ValueError(f"{key} must be a string or null")
+            out[key] = data[key] or None
+    return out
+
+
+def load_settings(path):
+    """Validated settings from `path`; {} when the file does not exist.
+
+    Raises ValueError for bad JSON or values, OSError for I/O problems.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid JSON in {path}: {exc}") from None
+    return validate_settings(data)
+
+
+def save_settings(path, data):
+    """Validate and write `data` atomically (temp file in the same folder,
+    then os.replace), creating the folder. Returns the saved dict."""
+    clean = validate_settings(data)
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(clean, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return clean
+
+
+def merge_settings(base, settings):
+    """`base` (CLI values) overridden by the keys present in `settings`."""
+    out = dict(base)
+    out.update(settings)
+    return out
+
+
+class SettingsWatcher:
+    """Reload a settings file when it changes, checking at most once per
+    `min_interval` seconds. `current` is the last good (validated) dict, {}
+    until a file loads. A deleted file keeps the last good settings."""
+
+    def __init__(self, path, clock=None, min_interval=SETTINGS_POLL_SECONDS):
+        self.path = path
+        self.clock = clock or time.monotonic
+        self.min_interval = min_interval
+        self.current = {}
+        self._next = None
+        self._sig = None
+
+    def poll(self):
+        """New settings dict if the file changed and is valid, else None.
+
+        Raises ValueError (bad content) or OSError (unreadable); a bad
+        version is raised once per change and `current` is kept.
+        """
+        now = self.clock()
+        if self._next is not None and now < self._next:
+            return None
+        self._next = now + self.min_interval
+        try:
+            st = os.stat(self.path)
+        except FileNotFoundError:
+            self._sig = None
+            return None
+        sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+        if sig == self._sig:
+            return None
+        try:
+            new = load_settings(self.path)
+        except ValueError:
+            self._sig = sig
+            raise
+        self._sig = sig
+        if new == self.current:
+            return None
+        self.current = new
+        return new

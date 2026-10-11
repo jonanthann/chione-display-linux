@@ -115,6 +115,7 @@ try:
         STALE_AFTER_SECONDS,
         UPDATE_INTERVAL_SECONDS,
         DisplayState,
+        SettingsWatcher,
         __version__,
         add_display_args,
         blank_packet,
@@ -124,8 +125,10 @@ try:
         do_init,
         format_response,
         make_update_packet,
+        merge_settings,
         pick_mode,
         run_test_pattern,
+        settings_path,
         temp_to_digits,
         warn_once,
     )
@@ -390,7 +393,7 @@ def _read_response(fd, timeout=0.2):
 
 def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None,
         mode="cpu", fahrenheit=False, alarm=None, cycle=5.0, fan=None,
-        fan_hwmon=None, fan_input=None):
+        fan_hwmon=None, fan_input=None, settings=None):
     """Drive the display until the device is lost or a stop is requested.
 
     Returns "stop" on a clean shutdown request, or "lost" if the device
@@ -399,10 +402,18 @@ def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None,
     "name") so a source re-resolved here survives reconnects; `fan` is None
     when there is no fan source (mode fan then needs a dict with path None,
     which is looked for again). `warned` is a set of error messages already
-    reported; it is cleared after a successful write.
+    reported; it is cleared after a successful write. `settings` is an
+    optional SettingsWatcher: its values override the arguments and are
+    reloaded live.
     """
     if warned is None:
         warned = set()
+    base = {"mode": mode, "cycle": cycle, "fahrenheit": fahrenheit,
+            "alarm": alarm, "fan_hwmon": fan_hwmon, "fan_input": fan_input}
+    if settings is not None:
+        opts = merge_settings(base, settings.current)
+        mode, cycle, fahrenheit, alarm, fan_hwmon, fan_input = (
+            opts[k] for k in base)
     fd = os.open(device_path, os.O_RDWR)
     try:
         os.set_blocking(fd, False)
@@ -424,6 +435,41 @@ def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None,
             warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
             return "lost"
         while not _stop:
+            if settings is not None:
+                try:
+                    new = settings.poll()
+                except (OSError, ValueError) as exc:
+                    warn_once(warned, f"Ignoring settings file: {exc}",
+                              sys.stderr)
+                    new = None
+                if new is not None:
+                    opts = merge_settings(base, new)
+                    refan = (opts["fan_hwmon"], opts["fan_input"]) != (
+                        fan_hwmon, fan_input)
+                    old_mode = mode
+                    (mode, cycle, fahrenheit, alarm, fan_hwmon,
+                     fan_input) = (opts[k] for k in base)
+                    states["cpu"].fahrenheit = fahrenheit
+                    states["cpu"].alarm = alarm
+                    print("Settings changed: " + " ".join(
+                        f"{k}={opts[k]}" for k in base), flush=True)
+                    if mode in ("fan", "auto") and (
+                            refan or fan is None or old_mode == "cpu"):
+                        if fan is None:
+                            fan = {"path": None, "name": None}
+                        new_path, new_name = resolve_hwmon_fan(fan_hwmon,
+                                                               fan_input)
+                        if new_path != fan["path"]:
+                            fan["path"], fan["name"] = new_path, new_name
+                            states["fan"] = DisplayState(
+                                interval, time.monotonic(), "fan")
+                            if new_path:
+                                print(f"Sensor changed, now reading: "
+                                      f"{new_path} ({new_name})", flush=True)
+                            else:
+                                print("No fan sensor found (see "
+                                      "--list-hwmon).", file=sys.stderr,
+                                      flush=True)
             try:
                 states["cpu"].reading(read_temp_celsius(sensor["path"]),
                                       time.monotonic())
@@ -550,6 +596,11 @@ def parse_args(argv):
                         "ignored)")
     p.add_argument("--fan-input", default=None, metavar="FILE",
                    help="fan*_input file to read, e.g. fan2_input")
+    p.add_argument("--settings", default=None, metavar="PATH",
+                   help="live settings file; its values override these "
+                        f"options (default: {settings_path()})")
+    p.add_argument("--no-settings", action="store_true",
+                   help="ignore the settings file")
     p.add_argument("--list-hidraw", action="store_true",
                    help="list all hidraw devices with USB IDs, then exit")
     p.add_argument("--list-hwmon", action="store_true",
@@ -617,13 +668,26 @@ def main(argv=None):
     print("Ctrl+C to stop.", flush=True)
 
     sensor = {"path": temp_path, "name": hwmon_name}
+    settings = None
+    if not args.no_settings:
+        settings = SettingsWatcher(args.settings or settings_path())
+        try:
+            settings.poll()
+        except (OSError, ValueError) as exc:
+            print(f"Ignoring settings file: {exc}", file=sys.stderr,
+                  flush=True)
+    eff = merge_settings(
+        {"mode": args.mode, "fan_hwmon": args.fan_hwmon,
+         "fan_input": args.fan_input},
+        settings.current if settings else {})
     fan = None
-    if args.mode in ("fan", "auto"):
-        fan_path, fan_name = resolve_hwmon_fan(args.fan_hwmon, args.fan_input)
+    if eff["mode"] in ("fan", "auto"):
+        fan_path, fan_name = resolve_hwmon_fan(eff["fan_hwmon"],
+                                               eff["fan_input"])
         if fan_path:
             fan = {"path": fan_path, "name": fan_name}
             print(f"Reading fan rpm from: {fan_path} ({fan_name})", flush=True)
-        elif args.mode == "fan":
+        elif eff["mode"] == "fan":
             fan = {"path": None, "name": None}
             print("No fan sensor found (see --list-hwmon); the display stays "
                   "blank until one appears.", file=sys.stderr, flush=True)
@@ -651,7 +715,7 @@ def main(argv=None):
             result = run(device_path, sensor, args.hwmon, args.temp_file,
                          args.interval, args.debug, warned, args.mode,
                          args.fahrenheit, args.alarm, args.cycle, fan,
-                         args.fan_hwmon, args.fan_input)
+                         args.fan_hwmon, args.fan_input, settings)
         except PermissionError:
             # Transient at boot: when this starts as a user service, the
             # logind uaccess ACL may not be applied to the node yet, so the

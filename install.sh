@@ -13,7 +13,9 @@
 #                                   ~/.config/chione-temp.conf for the script
 #   ./install.sh all                udev, then service
 #   ./install.sh print-rule         show the rule that would be installed
-#   ./install.sh remove             undo both (keeps chione-temp.conf)
+#   ./install.sh gui                install the GNOME app launcher + icon (no sudo)
+#   ./install.sh gui --remove       remove the launcher and icon
+#   ./install.sh remove             undo all (keeps chione-temp.conf)
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +30,12 @@ CONF_DST="$HOME/.config/chione-temp.conf"
 # $USER is not set in every environment (some containers, su -c, cron), and
 # `set -u` would abort on it.
 USER="${USER:-$(id -un)}"
+GUI_ID="io.github.jonanthann.ChioneDisplay"
+GUI_SCRIPT="$REPO_DIR/chione_gui.py"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+DESKTOP_DST="$DATA_HOME/applications/$GUI_ID.desktop"
+ICON_SRC="$REPO_DIR/data/$GUI_ID.svg"
+ICON_DST="$DATA_HOME/icons/hicolor/scalable/apps/$GUI_ID.svg"
 VID="1b80"
 PID="b53c"
 
@@ -393,7 +401,56 @@ EOF
     echo "active session): ./install.sh udev --group plugdev"
 }
 
+# Quotes one word for a .desktop Exec line (spaces, quotes, $, backtick,
+# backslash, and % doubled).
+desktop_quote() {
+    local v="$1"
+    v="${v//\\/\\\\\\\\}"; v="${v//\"/\\\\\"}"; v="${v//\`/\\\\\`}"
+    v="${v//\$/\\\\\$}"; v="${v//%/%%}"
+    printf '"%s"' "$v"
+}
+
+refresh_desktop_caches() {
+    command -v update-desktop-database >/dev/null 2>&1 \
+        && update-desktop-database "$(dirname "$DESKTOP_DST")" >/dev/null 2>&1 || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 \
+        && gtk-update-icon-cache -q -t "$DATA_HOME/icons/hicolor" >/dev/null 2>&1 || true
+    return 0
+}
+
+cmd_gui() {
+    if [ "${1:-}" = "--remove" ]; then
+        rm -f "$DESKTOP_DST" "$ICON_DST"
+        refresh_desktop_caches
+        ok "removed $DESKTOP_DST and $ICON_DST"
+        return 0
+    fi
+    [ $# -eq 0 ] || die "unknown option: $1. Usage: ./install.sh gui [--remove]"
+    command -v python3 >/dev/null 2>&1 || die "python3 not found: $(pkg_hint python3)"
+    [ -f "$GUI_SCRIPT" ] || die "missing $GUI_SCRIPT"
+    [ -f "$ICON_SRC" ] || die "missing $ICON_SRC"
+    mkdir -p "$(dirname "$DESKTOP_DST")" "$(dirname "$ICON_DST")"
+    cp "$ICON_SRC" "$ICON_DST"
+    cat > "$DESKTOP_DST" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Chione Display
+Comment=Control the Chione cooler display
+Exec=$(desktop_quote "$(command -v python3)") $(desktop_quote "$GUI_SCRIPT")
+Icon=$GUI_ID
+Terminal=false
+Categories=Settings;HardwareSettings;
+StartupNotify=true
+EOF
+    refresh_desktop_caches
+    ok "installed $DESKTOP_DST"
+    ok "installed $ICON_DST"
+    python3 -c 'import gi' 2>/dev/null \
+        || warn "python3-gi missing: $(pkg_hint 'python3-gi gir1.2-gtk-4.0 gir1.2-adw-1')"
+}
+
 cmd_remove() {
+    rm -f "$DESKTOP_DST" "$ICON_DST"
     if [ -f "$UNIT_DST" ]; then
         systemctl --user disable --now "$UNIT_NAME" 2>/dev/null || true
         # disable fails silently without a user bus, so drop the enable symlink by hand
@@ -421,8 +478,9 @@ case "${1:-check}" in
     print-rule) shift; cmd_print_rule "$@" ;;
     service)    shift; cmd_service "$@" ;;
     all)        shift; cmd_udev "$@"; cmd_service ;;
+    gui)        shift; cmd_gui "$@" ;;
     remove)     cmd_remove ;;
     -h|--help|help)
-        sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command '${1}'. Try: check | udev | service | all | remove" ;;
+        sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '${1}'. Try: check | udev | service | gui | all | remove" ;;
 esac
