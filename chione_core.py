@@ -14,9 +14,10 @@ reverse-engineered packet layout.
 import json
 import math
 import os
+import threading
 import time
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # USB identity of the Chione display.
 CHIONE_VID = 0x1B80
@@ -420,7 +421,7 @@ def save_settings(path, data):
     clean = validate_settings(data)
     folder = os.path.dirname(os.path.abspath(path))
     os.makedirs(folder, exist_ok=True)
-    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(clean, f, indent=2)

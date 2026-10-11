@@ -47,6 +47,7 @@ class DebBuildTests(unittest.TestCase):
             "/usr/share/chione-display/chione_core.py",
             "/usr/share/chione-display/chione_temp_display.py",
             "/usr/share/chione-display/chione_gui.py",
+            "/usr/share/chione-display/chione_web.py",
             "/usr/lib/udev/rules.d/70-chione.rules",
             "/usr/lib/systemd/user/chione-temp.service",
             "/usr/share/applications/io.github.jonanthann.ChioneDisplay.desktop",
@@ -55,6 +56,7 @@ class DebBuildTests(unittest.TestCase):
             self.assertIn(path, rows)
         self.assertEqual(rows["/usr/bin/chione-display"], "-rwxr-xr-x")
         self.assertEqual(rows["/usr/bin/chione-display-gui"], "-rwxr-xr-x")
+        self.assertEqual(rows["/usr/bin/chione-web"], "-rwxr-xr-x")
         self.assertFalse([p for p in rows if "tests" in p or "windows" in p])
 
 

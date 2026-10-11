@@ -25,6 +25,7 @@ the Windows script or in its parent folder.
 chione_core.py                    shared code (both platforms)
 chione_temp_display.py            Linux script
 chione_gui.py                     GNOME app (Linux, optional)
+chione_web.py                     browser settings panel (Linux, optional)
 windows/chione_temp_display_win.py   Windows script
 install.sh  systemd/  udev/       Linux setup
 data/                             app icon
@@ -434,6 +435,48 @@ installed (`./install.sh service`). On opening, the app shows the options from
 change in the app, so anything you never touched keeps following
 `CHIONE_ARGS`. Linux only.
 
+## Web panel (browser)
+
+[`chione_web.py`](chione_web.py) is the browser version of the GNOME app, for
+distributions without GNOME or Debian. It uses only the standard library and
+shows the same controls (live readings, mode, unit, alarm, fan source, service
+start/stop, display test, log), with the page text in Portuguese. With the
+.deb it is the `chione-web` command (in `/usr/bin`); from a clone run
+`./chione_web.py`. There is no `install.sh` subcommand for it.
+
+```bash
+chione-web                  # starts the server and opens the browser
+chione-web --port 9000 --no-browser
+chione-web --settings /path/to/settings.json
+```
+
+| Option | Effect |
+|--------|--------|
+| `--port N` | port to listen on (default 8765); exits with an error if it is taken |
+| `--no-browser` | only print the URL, don't open the browser |
+| `--settings PATH` | settings file to edit (default: the same `settings.json` as the service) |
+
+Stop it with Ctrl+C. Like the GNOME app, it does not talk to the cooler: it
+edits the same `settings.json`, and the running `chione-temp` service applies
+the change within 1 s. It also only saves the options you change, so anything
+you never touched keeps following `CHIONE_ARGS`.
+
+Security: the server binds only to `127.0.0.1`, rejects requests whose `Host`
+header is not `127.0.0.1:<port>` or `localhost:<port>`, and requires a random
+token, generated on each run, on every `/api/` request and to open the page.
+The token is part of the URL printed in the terminal (`/?t=...`), so other
+local users cannot open the panel without it. On a valid visit the server also
+sets a `HttpOnly`, `SameSite=Strict` cookie, so reloading the page (F5) works
+after the page removes the token from the address bar; the API still needs the
+token header. If you restart `chione-web`, open the new URL. Other machines on
+the network cannot reach it. The browser opens by itself only when a graphical
+session is detected (`DISPLAY` or `WAYLAND_DISPLAY`); over SSH it just prints
+the URL. To keep the token out of the browser's command line (visible to other
+users), it opens a temporary `0600` file in `$XDG_RUNTIME_DIR` that redirects
+to the URL, and deletes it after about 30 s and on exit. The service switch runs
+`systemctl --user enable --now` / `disable --now`, like the GNOME app. Linux
+only.
+
 ## Notes for Debian and Ubuntu
 
 The driver itself needs no changes. Only two things differ from a Fedora-
@@ -650,7 +693,7 @@ rely on before ordering.
 Unit tests live in `tests/`: `test_core.py` covers the shared
 `chione_core.py`, `test_settings.py` its settings file handling (validation,
 atomic save, live reload), `test_gui.py` the logic of `chione_gui.py` (it runs
-without GTK), and the others cover each platform script. Run them from the
+without GTK), `test_web.py` the logic and security checks of `chione_web.py`, and the others cover each platform script. Run them from the
 repository root:
 
 ```bash

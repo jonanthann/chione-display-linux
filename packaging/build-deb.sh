@@ -40,7 +40,7 @@ mkdir -p "$ROOT/DEBIAN" "$ROOT/$SHARE" "$ROOT/usr/bin" \
     "$ROOT/usr/share/doc/$PKG"
 
 # Application files
-for f in chione_core.py chione_temp_display.py chione_gui.py; do
+for f in chione_core.py chione_temp_display.py chione_gui.py chione_web.py; do
     if head -c 2 "$REPO_DIR/$f" | grep -q '^#!'; then
         install -m 0755 "$REPO_DIR/$f" "$ROOT/$SHARE/$f"
     else
@@ -55,6 +55,7 @@ write_wrapper() {
 }
 write_wrapper chione-display chione_temp_display.py
 write_wrapper chione-display-gui chione_gui.py
+write_wrapper chione-web chione_web.py
 
 # Desktop entry (same as install.sh gui, except Exec)
 cat > "$ROOT/usr/share/applications/$GUI_ID.desktop" <<DESKTOP

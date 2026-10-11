@@ -270,6 +270,107 @@ def run_display_test():
 
 # ------------------------------------------------------------------- UI
 
+CSS = """
+@define-color accent_color #ffffff;
+@define-color accent_bg_color #ffffff;
+@define-color accent_fg_color #000000;
+@define-color window_bg_color #000000;
+@define-color window_fg_color #ffffff;
+@define-color view_bg_color #000000;
+@define-color headerbar_bg_color #000000;
+@define-color headerbar_fg_color #ffffff;
+@define-color headerbar_border_color transparent;
+@define-color card_bg_color #0b0b0b;
+@define-color card_fg_color #ffffff;
+@define-color popover_bg_color #141414;
+@define-color popover_fg_color #ffffff;
+window, .background { background: #000; color: #fff; }
+headerbar { background: #000; box-shadow: none; border: none; }
+banner > revealer > widget { background: rgba(255,255,255,.1); color: #fff;
+  border: 1px solid rgba(255,255,255,.3); border-radius: 28px; margin: 8px 16px; }
+preferencespage > scrolledwindow > viewport > clamp { margin: 0 4px; }
+preferencesgroup label.heading {
+  font-size: 12px; font-weight: 600; letter-spacing: 2.2px; color: #a3a3a3; }
+list.boxed-list, .boxed-list {
+  background: linear-gradient(160deg, #141414, #050505);
+  border-radius: 32px; border: 1px solid rgba(255,255,255,.14);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28),
+              inset 0 0 28px rgba(255,255,255,.06),
+              0 0 32px rgba(255,255,255,.07); }
+.boxed-list > row { background: transparent; color: #fff; padding: 2px 8px;
+  border-color: rgba(255,255,255,.14); }
+.boxed-list > row:first-child { border-top-left-radius: 32px; border-top-right-radius: 32px; }
+.boxed-list > row:last-child { border-bottom-left-radius: 32px; border-bottom-right-radius: 32px; }
+.boxed-list > row:disabled { opacity: .55; }
+row .subtitle, row label.subtitle { color: #a3a3a3; }
+.hero { background: linear-gradient(160deg, #141414, #050505);
+  border-radius: 40px; border: 1px solid rgba(255,255,255,.14);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28),
+              inset 0 0 28px rgba(255,255,255,.06),
+              0 0 32px rgba(255,255,255,.07);
+  padding: 28px 20px 24px 20px; }
+.hero-circle { background: #fff; color: #000; border-radius: 50%;
+  min-width: 220px; min-height: 220px;
+  box-shadow: 0 0 60px rgba(255,255,255,.25); }
+.hero-circle .cap { font-size: 11px; font-weight: 700; letter-spacing: 2px;
+  color: #444; }
+.hero-circle .big { font-size: 38px; font-weight: 700; color: #000; }
+.hero-bar { padding: 10px 20px; border-radius: 999px;
+  background: linear-gradient(180deg, rgba(0,0,0,.5), rgba(0,0,0,.66));
+  border: 1px solid rgba(255,255,255,.4);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.5),
+              inset 0 0 24px rgba(255,255,255,.08); }
+.hero-bar .cap { font-size: 12px; letter-spacing: 2px; color: #eee; }
+.hero-bar .rpm { font-size: 18px; font-weight: 600; }
+.hero-title { font-size: 44px; font-weight: 600; letter-spacing: -2px; }
+.hero-badge { border: 1px solid #fff; border-radius: 999px; padding: 6px 12px; }
+.hero-badge label { font-size: 9px; letter-spacing: 2px; }
+.hero-badge .star { font-size: 14px; letter-spacing: 0; }
+entry, spinbutton, dropdown > button, .boxed-list spinbutton {
+  background: rgba(255,255,255,.08); color: #fff;
+  border: 1px solid rgba(255,255,255,.25); border-radius: 999px;
+  box-shadow: none; }
+row.spin { padding-right: 12px; }
+row.spin spinbutton { background: transparent; border: none; min-width: 0;
+  box-shadow: none; }
+row.spin spinbutton > text { background: transparent; min-width: 24px;
+  margin-right: 6px; }
+row.spin spinbutton > button { min-width: 28px; min-height: 28px;
+  padding: 0; margin: 0 2px; }
+headerbar button { background: transparent; border-color: transparent; }
+headerbar button:hover { background: rgba(255,255,255,.14); }
+button { border-radius: 999px; background: rgba(255,255,255,.08); color: #fff;
+  border: 1px solid rgba(255,255,255,.25); box-shadow: none; padding: 6px 16px; }
+button:hover { background: rgba(255,255,255,.16); }
+button.pill-solid { background: #fff; color: #000; border-color: #fff;
+  font-weight: 600; }
+button.pill-solid:hover { background: #d9d9d9; }
+button.pill-outline { background: transparent; color: #fff; border-color: #fff; }
+button.pill-outline:hover { background: rgba(255,255,255,.14); }
+button:disabled { opacity: .5; }
+windowcontrols { border-spacing: 8px; }
+windowcontrols > button { min-width: 0; min-height: 0; padding: 0;
+  margin: 0; border: none; background: none; box-shadow: none; }
+windowcontrols > button:hover { background: none; }
+windowcontrols > button > image { padding: 1px; margin: 0; border-radius: 50%;
+  box-shadow: none; -gtk-icon-size: 12px; color: transparent; }
+windowcontrols > button:hover > image { color: rgba(0,0,0,.6); }
+windowcontrols > button.close > image { background: #ff5f57; }
+windowcontrols > button.minimize > image { background: #febc2e; }
+windowcontrols > button.maximize > image { background: #28c840; }
+windowcontrols > button:backdrop > image { background: #3a3a3a; }
+switch { background: transparent; border: 1px solid #fff; border-radius: 999px;
+  box-shadow: none; }
+switch:checked { background: #fff; }
+switch slider { background: #fff; border-radius: 50%; box-shadow: none;
+  border: none; }
+switch:checked slider { background: #000; }
+:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+toast { background: rgba(255,255,255,.18); color: #fff; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.4); }
+"""
+
+
 
 def run_gui():
     try:
@@ -304,6 +405,14 @@ def run_gui():
             self.busy_live = False
             self.loading = True
 
+            Adw.StyleManager.get_default().set_color_scheme(
+                Adw.ColorScheme.FORCE_DARK)
+            provider = Gtk.CssProvider()
+            provider.load_from_string(CSS)
+            Gtk.StyleContext.add_provider_for_display(
+                self.get_display(), provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_USER)
+
             self.toasts = Adw.ToastOverlay()
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
             box.append(Adw.HeaderBar())
@@ -318,18 +427,42 @@ def run_gui():
             self.toasts.set_child(box)
             self.set_content(self.toasts)
 
-            # Live readings
-            g = Adw.PreferencesGroup(title="Leitura ao vivo")
-            self.cpu_lbl = Gtk.Label(css_classes=["title-1"], xalign=0)
-            self.fan_lbl = Gtk.Label(css_classes=["title-1"], xalign=0)
-            lbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            lbox.append(self.cpu_lbl)
-            lbox.append(self.fan_lbl)
-            g.add(lbox)
+            # Live readings (hero card)
+            g = Adw.PreferencesGroup()
+            V, H = Gtk.Orientation.VERTICAL, Gtk.Orientation.HORIZONTAL
+            C = Gtk.Align.CENTER
+            hero = Gtk.Box(orientation=V, spacing=20, css_classes=["hero"])
+            circle = Gtk.Box(orientation=V, halign=C, valign=C,
+                             css_classes=["hero-circle"])
+            inner = Gtk.Box(orientation=V, spacing=4, halign=C, valign=C,
+                            vexpand=True)
+            inner.append(Gtk.Label(label="TEMPERATURA DA CPU",
+                                   css_classes=["cap"]))
+            self.cpu_lbl = Gtk.Label(css_classes=["big"])
+            inner.append(self.cpu_lbl)
+            circle.append(inner)
+            hero.append(circle)
+            bar = Gtk.Box(orientation=H, spacing=12, css_classes=["hero-bar"])
+            bar.append(Gtk.Label(label="FAN", css_classes=["cap"]))
+            self.fan_lbl = Gtk.Label(css_classes=["rpm"], hexpand=True,
+                                     xalign=1)
+            bar.append(self.fan_lbl)
+            hero.append(bar)
+            foot = Gtk.Box(orientation=H, spacing=12, margin_top=8)
+            foot.append(Gtk.Label(label="Chione", xalign=0, hexpand=True,
+                                  css_classes=["hero-title"]))
+            badge = Gtk.Box(orientation=H, spacing=8, valign=Gtk.Align.END,
+                            css_classes=["hero-badge"])
+            badge.append(Gtk.Label(label="\u2500 \u2726",
+                                   css_classes=["star"]))
+            badge.append(Gtk.Label(label="CHIONE\nDISPLAY"))
+            foot.append(badge)
+            hero.append(foot)
+            g.add(hero)
             page.add(g)
 
             # Display
-            g = Adw.PreferencesGroup(title="Exibição")
+            g = Adw.PreferencesGroup(title="EXIBIÇÃO")
             self.mode_row = Adw.ComboRow(
                 title="Modo", model=Gtk.StringList.new(
                     ["CPU", "Fan", "Alternar"]))
@@ -349,7 +482,7 @@ def run_gui():
             page.add(g)
 
             # Alarm
-            g = Adw.PreferencesGroup(title="Alarme")
+            g = Adw.PreferencesGroup(title="ALARME")
             self.alarm_sw = Adw.SwitchRow(title="Piscar acima de")
             self.alarm_sw.set_active(st["alarm"] is not None)
             self.alarm_sw.connect("notify::active", self.on_spin)
@@ -362,7 +495,7 @@ def run_gui():
             page.add(g)
 
             # Fan
-            g = Adw.PreferencesGroup(title="Fan")
+            g = Adw.PreferencesGroup(title="FAN")
             self.fan_row = Adw.ComboRow(
                 title="Fonte do fan",
                 model=Gtk.StringList.new(fan_labels([])))
@@ -371,18 +504,20 @@ def run_gui():
             page.add(g)
 
             # Service
-            g = Adw.PreferencesGroup(title="Serviço")
+            g = Adw.PreferencesGroup(title="SERVIÇO")
             self.svc_sw = Adw.SwitchRow(title="Serviço ativo")
             self.svc_sw.connect("notify::active", self.on_service)
             g.add(self.svc_sw)
             self.test_btn = Gtk.Button(label="Testar display",
-                                       valign=Gtk.Align.CENTER)
+                                       valign=Gtk.Align.CENTER,
+                                       css_classes=["pill-solid"])
             self.test_btn.connect("clicked", self.on_test)
             row = Adw.ActionRow(title="Testar display",
                                 subtitle="Para o serviço e roda o padrão de teste")
             row.add_suffix(self.test_btn)
             g.add(row)
-            log_btn = Gtk.Button(label="Ver log", valign=Gtk.Align.CENTER)
+            log_btn = Gtk.Button(label="Ver log", valign=Gtk.Align.CENTER,
+                                 css_classes=["pill-outline"])
             log_btn.connect("clicked", self.on_log)
             row = Adw.ActionRow(title="Log do serviço")
             row.add_suffix(log_btn)
@@ -473,8 +608,8 @@ def run_gui():
                 self.busy_live = False
                 if not self.closed:
                     self.cpu_lbl.set_text(
-                        "CPU " + format_temp(cpu, state["fahrenheit"]))
-                    self.fan_lbl.set_text("FAN " + format_rpm(rpm))
+                        format_temp(cpu, state["fahrenheit"]))
+                    self.fan_lbl.set_text(format_rpm(rpm))
                 return False
 
             threading.Thread(target=work, daemon=True).start()
