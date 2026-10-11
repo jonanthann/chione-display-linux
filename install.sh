@@ -133,11 +133,22 @@ cmd_check() {
     head_ "Device access method"
     if [ -f "$RULE_DST" ]; then ok "udev rule installed at $RULE_DST"
     else warn "udev rule not installed (run './install.sh udev')"; fi
-    if command -v loginctl >/dev/null 2>&1 &&
-       loginctl show-user "$USER" -p State 2>/dev/null | grep -q 'State=active'; then
-        ok "active logind session: the default 'uaccess' rule applies"
+    # uaccess needs an active session attached to a seat; an SSH-only session
+    # is "active" but has no seat, so check both.
+    seat_session=""
+    if command -v loginctl >/dev/null 2>&1; then
+        for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$USER" '$3 == u {print $1}'); do
+            info="$(loginctl show-session "$sid" -p Seat -p State 2>/dev/null || true)"
+            if printf '%s\n' "$info" | grep -q '^State=active' &&
+               printf '%s\n' "$info" | grep -q '^Seat=.\+'; then
+                seat_session="$sid"; break
+            fi
+        done
+    fi
+    if [ -n "$seat_session" ]; then
+        ok "active logind session with a seat: the default 'uaccess' rule applies"
     else
-        warn "no active logind session: prefer './install.sh udev --group plugdev'"
+        warn "no active session with a seat: prefer './install.sh udev --group plugdev'"
     fi
 
     head_ "Service"
@@ -273,8 +284,8 @@ ExecStart="$py_u" "$script_x"
 WorkingDirectory=$repo_u
 Restart=on-failure
 RestartSec=5
-# Stop retrying on permanent misconfiguration (exit code 2): no matching
-# hwmon sensor. (A missing device permission is retried, not fatal.)
+# Stop retrying on permanent misconfiguration (exit code 2): bad arguments, or
+# no matching hwmon sensor after the ~60s startup wait. (A missing device permission is retried, not fatal.)
 RestartPreventExitStatus=2
 
 [Install]
@@ -288,6 +299,17 @@ EOF
            warn "will skip starting until it is mounted. Moving the repo under"
            warn "\$HOME and re-running './install.sh service' avoids that." ;;
     esac
+    # The script waits up to 60s for a CPU sensor and then exits with 2, so
+    # "started" after a short sleep would be misleading: check beforehand.
+    if ! grep -q 'default$' <<<"$(python3 "$SCRIPT" --list-hwmon 2>/dev/null || true)"; then
+        warn "=================================================================="
+        warn "no default CPU sensor found (k10temp / coretemp / zenpower)."
+        warn "The service will wait ~60s for one and then exit with an error."
+        warn "Intel: sudo modprobe coretemp   |   AMD: sudo modprobe k10temp"
+        warn "or pick a driver listed by '$SCRIPT --list-hwmon' with --hwmon"
+        warn "(add it to ExecStart in $UNIT_DST)."
+        warn "=================================================================="
+    fi
     systemctl --user daemon-reload
     systemctl --user enable "$UNIT_NAME"
     # restart, not "enable --now": on a re-run the service is already active

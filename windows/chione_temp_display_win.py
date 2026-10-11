@@ -59,6 +59,7 @@ reading is not mistaken for a live one.
 import argparse
 import http.client
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -99,6 +100,15 @@ STALE_AFTER_SECONDS = 5.0
 # Any non-digit byte blanks a display position (renders as a dash).
 BLANK = 0x20
 
+# Outside --debug, log the shown value at most this often (seconds).
+LOG_EVERY_SECONDS = 60.0
+
+# Upper bound for --interval (also keeps sleeps finite).
+MAX_INTERVAL_SECONDS = 60.0
+
+# Message kept across successful writes so reconnects do not repeat it.
+WRITING_MSG = "Writing to device: Chione E4 display"
+
 
 # ---------------------------------------------------------------------------
 # Protocol (identical to the Linux version)
@@ -109,7 +119,7 @@ def temp_to_digits(temp_c):
     (tens, units, tenths)."""
     t = max(0.0, min(99.9, round(temp_c, 1)))
     whole = int(t)
-    tenths = int(round((t - whole) * 10))
+    tenths = round((t - whole) * 10)
     if tenths == 10:
         whole += 1
         tenths = 0
@@ -252,7 +262,14 @@ def list_sensors(url):
 
 # ---------------------------------------------------------------------------
 
-def open_display():
+def _warn_once(warned, msg, file=None):
+    """Print msg unless it was already reported since the last success."""
+    if msg not in warned:
+        print(msg, file=file, flush=True)
+        warned.add(msg)
+
+
+def open_display(warned=None):
     """Open the Chione display, or return None if it isn't present."""
     if not hid.enumerate(CHIONE_VID, CHIONE_PID):
         return None
@@ -262,16 +279,29 @@ def open_display():
     except OSError as exc:
         # Present but not openable yet (still enumerating, or held
         # exclusively by ZEUS CAST): treat as absent and retry later.
-        print(f"Could not open the display ({exc}).", file=sys.stderr,
-              flush=True)
+        msg = f"Could not open the display ({exc})."
+        if warned is None:
+            print(msg, file=sys.stderr, flush=True)
+        else:
+            _warn_once(warned, msg, sys.stderr)
         return None
     device.set_nonblocking(True)
     return device
 
 
-def run(device, url, sensor_path, sensor_name, wanted, interval, debug):
-    """Drive the display until the device is lost or the user stops it."""
+def run(device, url, sensor, wanted, interval, debug, warned=None):
+    """Drive the display until the device is lost or the user stops it.
+
+    `sensor` is a mutable dict ("path", "name") so a sensor re-resolved here
+    survives reconnects. `warned` is a set of error messages already
+    reported; it is cleared after a successful write.
+    """
+    if warned is None:
+        warned = set()
     last_digits = None
+    logged_digits = None
+    last_log = None
+    last_stale = None
     last_temp = None
     last_good = time.monotonic()
     prev_resp = None
@@ -279,7 +309,7 @@ def run(device, url, sensor_path, sensor_name, wanted, interval, debug):
 
     while True:
         try:
-            temp = read_sensor(url, sensor_path, sensor_name)
+            temp = read_sensor(url, sensor["path"], sensor["name"])
             if temp is not None:
                 last_temp = temp
                 last_good = time.monotonic()
@@ -304,24 +334,31 @@ def run(device, url, sensor_path, sensor_name, wanted, interval, debug):
             if time.monotonic() - last_resolve >= RECONNECT_DELAY_SECONDS:
                 last_resolve = time.monotonic()
                 try:
-                    found = pick_cpu_sensor(
-                        list(walk_temperature_sensors(fetch_lhm_tree(url))),
-                        wanted)
+                    sensors = list(walk_temperature_sensors(fetch_lhm_tree(url)))
+                    found = pick_cpu_sensor(sensors, wanted)
+                    # Without --sensor, a CPU sensor must not be replaced by
+                    # the non-CPU fallback (it would stick to it).
+                    if (found and not wanted and _is_cpu_path(sensor["path"])
+                            and not _is_cpu_path(found[0])):
+                        found = None
                 except (urllib.error.URLError, OSError, ValueError,
                         http.client.HTTPException):
                     found = None
-                if found and found != (sensor_path, sensor_name):
-                    sensor_path, sensor_name = found
-                    print(f"Sensor changed, now reading: {sensor_name} "
-                          f"[{' / '.join(sensor_path[:-1])}]", flush=True)
+                if found and found != (sensor["path"], sensor["name"]):
+                    sensor["path"], sensor["name"] = found
+                    print(f"Sensor changed, now reading: {sensor['name']} "
+                          f"[{' / '.join(sensor['path'][:-1])}]", flush=True)
         else:
             digits = temp_to_digits(last_temp)
         try:
             write_report(device, make_update_packet(*digits))
             resp = device.read(64)
         except (OSError, ValueError) as exc:
-            print(f"Device I/O failed ({exc}); will reconnect.", flush=True)
+            _warn_once(warned, f"Device I/O failed ({exc}); will reconnect.")
             return "lost"
+        # A successful write re-arms warnings (WRITING_MSG is kept so
+        # reconnects do not repeat it).
+        warned.intersection_update({WRITING_MSG})
 
         if debug and resp:
             resp = bytes(resp)
@@ -332,14 +369,23 @@ def run(device, url, sensor_path, sensor_name, wanted, interval, debug):
                     print(f"  changed offsets vs prev: {changed}", flush=True)
             prev_resp = resp
 
-        if digits != last_digits:
+        # Outside --debug, log at most every LOG_EVERY_SECONDS, but at once
+        # on first reading and on stale transitions.
+        now = time.monotonic()
+        important = last_stale is None or stale != last_stale
+        due = last_log is None or now - last_log >= LOG_EVERY_SECONDS
+        if (debug and digits != last_digits) or important or (
+                due and not debug and digits != logged_digits):
             if stale:
-                print(f"Cannot read '{sensor_name}' from {url}; display "
+                print(f"Cannot read '{sensor['name']}' from {url}; display "
                       "blanked.", file=sys.stderr, flush=True)
             else:
                 print(f"CPU: {last_temp:.1f}C -> display: "
                       f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
-            last_digits = digits
+            last_log = now
+            logged_digits = digits
+        last_digits = digits
+        last_stale = stale
 
         time.sleep(interval)
 
@@ -364,8 +410,12 @@ def parse_args(argv):
                         "instead of failing immediately; use -1 to wait "
                         "forever (recommended when starting at login)")
     args = p.parse_args(argv)
-    if args.interval < MIN_INTERVAL_SECONDS:
-        p.error(f"--interval must be at least {MIN_INTERVAL_SECONDS}")
+    if not math.isfinite(args.interval) or not (
+            MIN_INTERVAL_SECONDS <= args.interval <= MAX_INTERVAL_SECONDS):
+        p.error(f"--interval must be between {MIN_INTERVAL_SECONDS} and "
+                f"{MAX_INTERVAL_SECONDS:.0f}")
+    if args.wait < 0 and args.wait != -1:
+        p.error("--wait must be -1 (forever) or >= 0")
     return args
 
 
@@ -422,6 +472,7 @@ def main(argv=None):
                   "available with --list-sensors.", file=sys.stderr)
         return 2
     sensor_path, sensor_name = chosen
+    sensor = {"path": sensor_path, "name": sensor_name}
     if not args.sensor and not _is_cpu_path(sensor_path):
         print("Warning: no CPU sensor was identified; using "
               f"{sensor_name!r} [{' / '.join(sensor_path[:-1])}]. Check "
@@ -432,20 +483,22 @@ def main(argv=None):
     print("Ctrl+C to stop.", flush=True)
 
     device = None
+    warned = set()
     try:
         while True:
             if device is None:
-                device = open_display()
+                device = open_display(warned)
                 if device is None:
-                    print(f"Chione display ({CHIONE_VID:04X}:{CHIONE_PID:04X}) "
-                          "not found - is it plugged in? Retrying...",
-                          flush=True)
+                    _warn_once(warned,
+                               f"Chione display ({CHIONE_VID:04X}:"
+                               f"{CHIONE_PID:04X}) not found - is it plugged "
+                               "in? Retrying...")
                     time.sleep(RECONNECT_DELAY_SECONDS)
                     continue
-                print("Writing to device: Chione E4 display", flush=True)
+                _warn_once(warned, WRITING_MSG)
 
-            run(device, args.url, sensor_path, sensor_name, args.sensor,
-                args.interval, args.debug)
+            run(device, args.url, sensor, args.sensor,
+                args.interval, args.debug, warned)
 
             # run() only returns when the device was lost; drop it and retry.
             try:

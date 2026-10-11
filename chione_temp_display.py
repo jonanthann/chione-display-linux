@@ -97,6 +97,7 @@ live one, and USB replug / suspend-resume are recovered automatically.
 
 import argparse
 import glob
+import math
 import os
 import select
 import signal
@@ -152,6 +153,16 @@ STALE_AFTER_SECONDS = 5.0
 # transient (see main). The systemd unit uses RestartPreventExitStatus=2 to stop
 # retrying a hopeless start instead of looping forever.
 EXIT_CONFIG_ERROR = 2
+
+# Outside --debug, log the shown value at most this often (seconds).
+LOG_EVERY_SECONDS = 60.0
+
+# Upper bound for --interval (also keeps sleeps finite).
+MAX_INTERVAL_SECONDS = 60.0
+# How long to wait at startup for the sensor to appear (e.g. coretemp loaded
+# late) before giving up, and how often to check meanwhile.
+SENSOR_WAIT_SECONDS = 60.0
+SENSOR_POLL_SECONDS = 2.0
 
 # Any non-digit byte blanks a display position (renders as a dash).
 BLANK = 0x20
@@ -295,7 +306,7 @@ def temp_to_digits(temp_c):
     (tens, units, tenths)."""
     t = max(0.0, min(99.9, round(temp_c, 1)))
     whole = int(t)
-    tenths = int(round((t - whole) * 10))
+    tenths = round((t - whole) * 10)
     if tenths == 10:
         whole += 1
         tenths = 0
@@ -329,29 +340,40 @@ def _read_response(fd):
         return None
 
 
-def run(device_path, temp_path, interval, debug):
+def run(device_path, sensor, hwmon, temp_file, interval, debug, warned=None):
     """Drive the display until the device is lost or a stop is requested.
 
     Returns "stop" on a clean shutdown request, or "lost" if the device
     disappeared (so the caller can wait and reconnect). Blanks the display on
-    the way out either way.
+    the way out either way. `sensor` is a mutable dict ("path", "name") so a
+    sensor re-resolved here survives reconnects. `warned` is a set of error
+    messages already reported; it is cleared after a successful write.
     """
+    if warned is None:
+        warned = set()
     fd = os.open(device_path, os.O_RDWR)
     try:
         os.set_blocking(fd, False)
     except BaseException:
         os.close(fd)
         raise
-    print(f"Writing to device: {device_path}", flush=True)
+    msg = f"Writing to device: {device_path}"
+    if msg not in warned:
+        print(msg, flush=True)
+        warned.add(msg)
 
     last_digits = None
+    logged_digits = None
+    last_log = None
+    last_stale = None
     last_temp = None
     last_good = time.monotonic()
     prev_resp = None
+    last_resolve = 0.0
     try:
         while not _stop:
             try:
-                last_temp = read_temp_celsius(temp_path)
+                last_temp = read_temp_celsius(sensor["path"])
                 last_good = time.monotonic()
             except (OSError, ValueError):
                 # Transient sensor hiccup: reuse the last good reading rather
@@ -364,6 +386,15 @@ def run(device_path, temp_path, interval, debug):
                 # The sensor has been gone for a while (driver unloaded,
                 # hwmon renumbered): blank rather than show a frozen value.
                 digits = (BLANK, BLANK, BLANK)
+                # hwmon may have been renumbered (driver reloaded): look for
+                # the sensor again, at most once per reconnect delay.
+                if time.monotonic() - last_resolve >= RECONNECT_DELAY_SECONDS:
+                    last_resolve = time.monotonic()
+                    new_path, new_name = resolve_hwmon_temp_path(hwmon, temp_file)
+                    if new_path and new_path != sensor["path"]:
+                        sensor["path"], sensor["name"] = new_path, new_name
+                        print(f"Sensor changed, now reading: {new_path} "
+                              f"({new_name})", flush=True)
             elif last_temp is None:
                 # Never read yet and not stale: leave the display untouched.
                 _sleep_interruptible(interval)
@@ -374,8 +405,14 @@ def run(device_path, temp_path, interval, debug):
                 os.write(fd, make_update_packet(*digits))
                 resp = _read_response(fd)
             except OSError as exc:
-                print(f"Device I/O failed ({exc}); will reconnect.", flush=True)
+                msg = f"Device I/O failed ({exc}); will reconnect."
+                if msg not in warned:
+                    print(msg, flush=True)
+                    warned.add(msg)
                 return "lost"
+            # A successful write re-arms warnings (the "Writing to device"
+            # line is kept in the set so reconnects do not repeat it).
+            warned.intersection_update({f"Writing to device: {device_path}"})
 
             if debug and resp is not None:
                 print(f"  resp: {resp.hex(' ')}", flush=True)
@@ -385,16 +422,24 @@ def run(device_path, temp_path, interval, debug):
                         print(f"  changed offsets vs prev: {changed}", flush=True)
                 prev_resp = resp
 
-            # Log only when the shown value changes (avoids ~172k journal
-            # lines/day); flush so `systemctl status` isn't block-buffered.
-            if digits != last_digits:
+            # Outside --debug, log at most every LOG_EVERY_SECONDS, but at
+            # once on first reading and on stale transitions. Flush so
+            # `systemctl status` isn't block-buffered.
+            now = time.monotonic()
+            important = last_stale is None or stale != last_stale
+            due = last_log is None or now - last_log >= LOG_EVERY_SECONDS
+            if (debug and digits != last_digits) or important or (
+                    due and not debug and digits != logged_digits):
                 if stale:
-                    print(f"Cannot read {temp_path}; display blanked.",
+                    print(f"Cannot read {sensor['path']}; display blanked.",
                           file=sys.stderr, flush=True)
                 else:
                     print(f"CPU: {last_temp:.1f}C -> display: "
                           f"{digits[0]}{digits[1]}.{digits[2]}", flush=True)
-                last_digits = digits
+                last_log = now
+                logged_digits = digits
+            last_digits = digits
+            last_stale = stale
 
             _sleep_interruptible(interval)
     finally:
@@ -429,8 +474,10 @@ def parse_args(argv):
     p.add_argument("--list-hwmon", action="store_true",
                    help="list all hwmon temperature sensors, then exit")
     args = p.parse_args(argv)
-    if args.interval < MIN_INTERVAL_SECONDS:
-        p.error(f"--interval must be at least {MIN_INTERVAL_SECONDS}")
+    if not math.isfinite(args.interval) or not (
+            MIN_INTERVAL_SECONDS <= args.interval <= MAX_INTERVAL_SECONDS):
+        p.error(f"--interval must be between {MIN_INTERVAL_SECONDS} and "
+                f"{MAX_INTERVAL_SECONDS:.0f}")
     return args
 
 
@@ -450,6 +497,19 @@ def main(argv=None):
 
     temp_path, hwmon_name = resolve_hwmon_temp_path(args.hwmon, args.temp_file)
     if not temp_path:
+        # The driver may simply load late at boot: wait before giving up.
+        print(f"Waiting up to {SENSOR_WAIT_SECONDS:.0f}s for a CPU hwmon "
+              "sensor...", flush=True)
+        deadline = time.monotonic() + SENSOR_WAIT_SECONDS
+        while not _stop and time.monotonic() < deadline:
+            _sleep_interruptible(SENSOR_POLL_SECONDS)
+            temp_path, hwmon_name = resolve_hwmon_temp_path(
+                args.hwmon, args.temp_file)
+            if temp_path:
+                break
+    if _stop:
+        return 0
+    if not temp_path:
         tried = args.hwmon or ", ".join(HWMON_CANDIDATES)
         print(f"Could not find a CPU hwmon sensor exposing "
               f"'{args.temp_file}' (tried: {tried}).", file=sys.stderr)
@@ -463,8 +523,10 @@ def main(argv=None):
     print(f"Reading temperature from: {temp_path} ({hwmon_name})", flush=True)
     print("Ctrl+C to stop.", flush=True)
 
+    sensor = {"path": temp_path, "name": hwmon_name}
     perm_warned = False
     absent_warned = False
+    warned = set()
     while not _stop:
         device_path = args.device or find_hidraw_device(CHIONE_VID, CHIONE_PID)
         if not device_path:
@@ -479,7 +541,8 @@ def main(argv=None):
         absent_warned = False
 
         try:
-            result = run(device_path, temp_path, args.interval, args.debug)
+            result = run(device_path, sensor, args.hwmon, args.temp_file,
+                         args.interval, args.debug, warned)
         except PermissionError:
             # Transient at boot: when this starts as a user service, the
             # logind uaccess ACL may not be applied to the node yet, so the
@@ -505,7 +568,10 @@ def main(argv=None):
         except OSError as exc:
             # Node vanished or is not ready (ENODEV, ENXIO, EIO, EBUSY on
             # replug/resume); rediscover and retry.
-            print(f"Cannot open device ({exc}); will retry.", flush=True)
+            msg = f"Cannot open device ({exc}); will retry."
+            if msg not in warned:
+                print(msg, flush=True)
+                warned.add(msg)
             result = "lost"
 
         if result == "stop":

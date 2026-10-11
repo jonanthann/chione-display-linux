@@ -52,7 +52,13 @@ working without leaving ZEUS CAST running.
   sensor
 - **Self-recovers** from USB replug and suspend/resume, and blanks the
   display (`--.-`) on exit and when the sensor stops responding, so a
-  frozen reading isn't mistaken for a live one
+  frozen reading isn't mistaken for a live one. On Linux it also looks for
+  the hwmon sensor again if it disappears or is renumbered (driver reload),
+  and on Windows it keeps a re-resolved sensor across reconnects (without
+  `--sensor` it never swaps a CPU sensor for a non-CPU one). Outside
+  `--debug` the shown value is logged at most once every 60 s (the first
+  reading and blank/live transitions are logged at once), and each device
+  error warning is printed once until a write succeeds
 - On Linux: needs no Wine, no proprietary SDK, and no root access after a
   one-time udev rule is installed
 
@@ -144,7 +150,7 @@ CPU temperature sensor
 
 Device access method
   + udev rule installed at /etc/udev/rules.d/70-chione.rules
-  + active logind session: the default 'uaccess' rule applies
+  + active logind session with a seat: the default 'uaccess' rule applies
 
 Service
   + unit installed at /home/you/.config/systemd/user/chione-temp.service
@@ -213,7 +219,9 @@ python3 chione_temp_display.py --list-hwmon    # temperature sensors
 ```
 
 This generates the unit with this checkout's real path, so it works wherever
-you cloned the repo. By hand instead:
+you cloned the repo. If no default CPU sensor exists yet, it prints a
+warning first (the service would wait about 60 s and then exit with code 2).
+By hand instead:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -259,7 +267,7 @@ sudo apt install usbutils lm-sensors   # optional, diagnosis only
 
 **Intel CPUs may need the sensor driver loaded.** `k10temp` (AMD) autoloads
 on Debian, but `coretemp` sometimes does not, and then no CPU sensor exists
-for the script to find. Check with `--list-hwmon`; if nothing is marked
+for the script to find (at startup the script waits up to 60 s for it, then exits with code 2). Check with `--list-hwmon`; if nothing is marked
 `<- default`:
 
 ```bash
@@ -329,7 +337,7 @@ script needs editing.
 | `--device PATH` | auto | hidraw node; override auto-discovery for unusual setups |
 | `--hwmon NAME` | auto | pin the hwmon driver; auto tries `k10temp`, `coretemp`, `zenpower` |
 | `--temp-file NAME` | `temp1_input` | which `temp*_input` file to read |
-| `--interval SECONDS` | `0.5` | how often to refresh the display (minimum `0.1`) |
+| `--interval SECONDS` | `0.5` | how often to refresh the display (between `0.1` and `60`) |
 | `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
 | `--list-hidraw` | — | list all HID devices with their USB IDs, then exit |
 | `--list-hwmon` | — | list every hwmon temperature sensor with live values, then exit |
@@ -352,8 +360,8 @@ k10temp   temp3_input   42.2C   Tccd1
 |------|---------|---------|
 | `--url URL` | `http://localhost:8085/data.json` | LibreHardwareMonitor's JSON endpoint |
 | `--sensor NAME` | auto | sensor to display; override the CPU auto-detection |
-| `--interval SECONDS` | `0.5` | how often to refresh the display (minimum `0.1`) |
-| `--wait SECONDS` | `0` | wait for LibreHardwareMonitor to come up; `-1` waits forever |
+| `--interval SECONDS` | `0.5` | how often to refresh the display (between `0.1` and `60`) |
+| `--wait SECONDS` | `0` | wait for LibreHardwareMonitor to come up; `-1` waits forever; other negative values are rejected |
 | `--debug` | off | hexdump the device's reply (a lead for decoding fan RPM) |
 | `--list-sensors` | — | list every temperature sensor LibreHardwareMonitor reports, then exit |
 
@@ -362,7 +370,7 @@ k10temp   temp3_input   42.2C   Tccd1
 | Script | Code | Meaning |
 |--------|------|---------|
 | Linux | `0` | stopped normally (Ctrl+C or SIGTERM), or a `--list-*` flag |
-| Linux | `2` | no CPU hwmon sensor found (also argparse errors); the systemd unit's `RestartPreventExitStatus=2` uses it to stop restarting |
+| Linux | `2` | no CPU hwmon sensor found after waiting up to 60 s at startup (also argparse errors); the systemd unit's `RestartPreventExitStatus=2` uses it to stop restarting |
 | Windows | `0` | stopped normally |
 | Windows | `2` | LibreHardwareMonitor unreachable after `--wait`, or no sensor found |
 | Windows | `1` | `--list-sensors` found no sensors or could not connect |
@@ -406,6 +414,14 @@ is the same protocol, a variant, or something unrelated. Reports that a
 model works unchanged are as valuable as reports that it doesn't: together
 they are what turns the tested-hardware table into something a buyer can
 rely on before ordering.
+
+## Development
+
+Unit tests live in `tests/`. Run them from the repository root:
+
+```bash
+python3 -m unittest discover -s tests
+```
 
 ## Disclaimer
 
