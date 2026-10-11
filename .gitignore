@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 LOOP_PROGRESSO.md
+dist/

@@ -141,6 +141,28 @@ On the hardware, FAN mode lights a small yellow fan icon to the left of
 the "FAN RPM" label and shows the RPM as four digits with no decimal
 point; the CPU icon and the unit go dark.
 
+## Install from the .deb
+
+On Debian, Ubuntu and derivatives, download `chione-display_X.Y.Z_all.deb` from
+the [Releases](https://github.com/jonanthann/chione-display-linux/releases)
+page and install it (this also loads the udev rule):
+
+```bash
+sudo apt install ./chione-display_X.Y.Z_all.deb
+systemctl --user enable --now chione-temp   # start the display service
+```
+
+Replug the cooler once if it was already connected, then open "Chione Display"
+from the app menu (needs `python3-gi`, `gir1.2-gtk-4.0`, `gir1.2-adw-1`, which
+apt installs as recommended packages). To remove it, stop the service first
+so no stale link is left in your user's systemd folder, then remove the
+package:
+
+```bash
+systemctl --user disable --now chione-temp
+sudo apt remove chione-display
+```
+
 ## Setup (Linux)
 
 Nothing here is distribution-specific: the same steps work on Debian,
@@ -641,12 +663,17 @@ targeting Python 3.9) and [shellcheck](https://www.shellcheck.net/):
 ```bash
 pip install ruff==0.17.0
 ruff check .
-shellcheck -S warning install.sh
+shellcheck -S warning install.sh packaging/build-deb.sh
 ```
 
 GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs on every push and
 pull request to `main`: the tests on Ubuntu and Windows with Python 3.9 and
 3.13, plus ruff and shellcheck.
+
+`packaging/build-deb.sh` builds `dist/chione-display_<version>_all.deb`. Pushing
+a tag such as `v1.2.0` runs [`release.yml`](.github/workflows/release.yml),
+which checks the tag against `__version__`, runs the tests, builds the .deb and
+publishes it as a GitHub Release.
 
 ## Disclaimer
 

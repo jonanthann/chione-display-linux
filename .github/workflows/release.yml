@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches __version__
+        run: |
+          version="$(python3 -c 'import chione_core; print(chione_core.__version__)')"
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match __version__ $version" >&2
+            exit 1
+          fi
+      - name: Run tests
+        run: python3 -m unittest discover -s tests
+      - name: Build the .deb
+        run: packaging/build-deb.sh
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" dist/*.deb \
+            --title "Chione Display $version" \
+            --notes "Unofficial Linux driver and GNOME app for the Gamdias Chione E4 display. ZEUS CAST and Windows are not needed.
+
+          Install:
+
+              sudo apt install ./chione-display_${version}_all.deb
+              systemctl --user enable --now chione-temp
+
+          Then open \"Chione Display\" from the app menu to change the settings."

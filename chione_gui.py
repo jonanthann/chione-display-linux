@@ -222,7 +222,16 @@ def systemctl(*args):
 
 
 def service_installed():
-    return os.path.exists(os.path.expanduser(UNIT_PATH))
+    # `cat` finds units in ~/.config (install.sh) and in /usr/lib (the .deb).
+    return systemctl("cat", SERVICE)[0] or os.path.exists(
+        os.path.expanduser(UNIT_PATH))
+
+
+def service_hint():
+    """How to install the service, depending on how the app was installed."""
+    if HERE.startswith("/usr/share/chione-display"):
+        return "systemctl --user enable --now " + SERVICE
+    return "./install.sh service"
 
 
 def service_active():
@@ -299,7 +308,7 @@ def run_gui():
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
             box.append(Adw.HeaderBar())
             self.banner = Adw.Banner(
-                title="Serviço não instalado. Rode ./install.sh service",
+                title="Serviço não instalado. Rode " + service_hint(),
                 revealed=not service_installed())
             box.append(self.banner)
             page = Adw.PreferencesPage()
@@ -494,7 +503,8 @@ def run_gui():
             want = self.svc_sw.get_active()
 
             def work():
-                ok, _out = systemctl("start" if want else "stop", SERVICE)
+                ok, _out = systemctl(
+                    "enable" if want else "disable", "--now", SERVICE)
                 GLib.idle_add(done, ok)
 
             def done(ok):

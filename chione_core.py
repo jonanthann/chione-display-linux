@@ -16,7 +16,7 @@ import math
 import os
 import time
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # USB identity of the Chione display.
 CHIONE_VID = 0x1B80
