@@ -26,6 +26,7 @@ def packets(path):
     return [data[i:i + 64] for i in range(0, len(data), 64)]
 
 
+@unittest.skipUnless(os.name == "posix", "Linux driver tests need POSIX")
 class TestLinuxSelfTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

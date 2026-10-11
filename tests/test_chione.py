@@ -23,6 +23,9 @@ class FakeGlob:
         return _glob.glob(pat.replace("/sys/class/hwmon", self.root))
 
 
+# The Linux driver talks to sysfs and hidraw (os.set_blocking on a file fd,
+# "/" paths), which Windows cannot emulate.
+@unittest.skipUnless(os.name == "posix", "Linux driver tests need POSIX")
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
